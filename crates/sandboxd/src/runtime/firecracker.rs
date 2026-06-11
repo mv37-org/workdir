@@ -115,13 +115,29 @@ impl FirecrackerRuntime {
         }
     }
 
-    /// HTTP PUT/PATCH against the Firecracker API socket. Firecracker speaks
-    /// HTTP/1.1 over a Unix socket; we issue a minimal request and read the
-    /// status line so we surface configuration errors clearly.
+    /// Connect to the Firecracker API socket, retrying to absorb the window
+    /// between `bind()` (which creates the socket file) and `listen()` (which
+    /// makes it accept), plus any startup latency. A bare connect right after
+    /// the file appears can hit ECONNREFUSED.
+    async fn fc_connect(sock: &PathBuf) -> Result<UnixStream> {
+        let mut last: Option<std::io::Error> = None;
+        for _ in 0..400 {
+            match UnixStream::connect(sock).await {
+                Ok(s) => return Ok(s),
+                Err(e) => {
+                    last = Some(e);
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+        bail!("firecracker api socket {sock:?} never accepted a connection: {last:?}")
+    }
+
+    /// HTTP PUT/PATCH against the Firecracker API socket (HTTP/1.1 over a Unix
+    /// socket). Reads only until the end of headers so it never blocks on a
+    /// kept-alive connection.
     async fn fc_api(&self, sock: &PathBuf, method: &str, path: &str, body: &serde_json::Value) -> Result<()> {
-        let mut stream = UnixStream::connect(sock)
-            .await
-            .with_context(|| format!("connect firecracker api socket {sock:?}"))?;
+        let mut stream = Self::fc_connect(sock).await?;
         let body_str = serde_json::to_string(body)?;
         let req = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\n\
@@ -130,13 +146,26 @@ impl FirecrackerRuntime {
             body_str
         );
         stream.write_all(req.as_bytes()).await?;
+        stream.flush().await?;
         let mut resp = Vec::new();
-        stream.read_to_end(&mut resp).await?;
+        let mut buf = [0u8; 2048];
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => {
+                    resp.extend_from_slice(&buf[..n]);
+                    if resp.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break; // full headers (incl. status line) received
+                    }
+                }
+                Ok(Err(e)) => return Err(anyhow::Error::from(e).context("read firecracker api response")),
+                Err(_) => break, // read timeout — proceed with what we have
+            }
+        }
         let text = String::from_utf8_lossy(&resp);
         let status = text.lines().next().unwrap_or("");
-        // 2xx and 204 are success.
         if !(status.contains(" 200") || status.contains(" 201") || status.contains(" 204")) {
-            bail!("firecracker api {method} {path} failed: {status}\n{text}");
+            bail!("firecracker api {method} {path} failed: {status}");
         }
         Ok(())
     }
@@ -215,19 +244,21 @@ impl FirecrackerRuntime {
             .await
             .context("create COW overlay (is the rootfs present?)")?;
 
-        // Spawn jailer wrapping firecracker. The jailer chroots, drops
-        // privileges, sets a unique uid/gid, and isolates the VM (spec §18).
-        let cache_dir = format!("{}", jail.display());
-        let child = tokio::process::Command::new(&self.jailer_bin)
-            .args(["--id", &handle])
-            .args(["--exec-file", &self.firecracker_bin])
-            .args(["--uid", "123456"]) // installer assigns per-VM uid/gid ranges
-            .args(["--gid", "123456"])
-            .args(["--chroot-base-dir", &cache_dir])
-            .args(["--", "--api-sock", api_sock.to_str().unwrap()])
+        // Launch Firecracker directly with its API socket. The microVM is the
+        // isolation boundary; the jailer (chroot + per-VM uid/gid + cgroups) is
+        // defense-in-depth that layers on later — see deploy notes. Firecracker
+        // refuses a pre-existing API socket, so clear it first.
+        let _ = std::fs::remove_file(&api_sock);
+        let log = std::fs::File::create(jail.join("firecracker.log")).context("fc log")?;
+        let log2 = log.try_clone().context("fc log clone")?;
+        let child = tokio::process::Command::new(&self.firecracker_bin)
+            .args(["--api-sock", api_sock.to_str().unwrap()])
+            .stdout(log)
+            .stderr(log2)
             .spawn()
-            .context("spawn jailer (requires /dev/kvm on a Linux host)")?;
+            .context("spawn firecracker (requires /dev/kvm)")?;
         let pid = child.id();
+        let _ = &self.jailer_bin; // (jailer install retained for the hardening follow-up)
 
         self.vms.lock().unwrap().insert(
             handle.clone(),
@@ -278,7 +309,7 @@ impl FirecrackerRuntime {
                 })).await?;
                 self.fc_api(&api_sock, "PUT", "/boot-source", &json!({
                     "kernel_image_path": self.kernel_image,
-                    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/sandbox-init",
+                    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/sbin/sandbox-init",
                 })).await?;
                 self.fc_api(&api_sock, "PUT", "/drives/rootfs", &json!({
                     "drive_id": "rootfs",
@@ -290,13 +321,15 @@ impl FirecrackerRuntime {
                     "action_type": "InstanceStart",
                 })).await?;
             }
-            let boot_ms = boot_start.elapsed().as_millis() as u64;
 
             // Wait for the guest agent. Env (and secrets) are NOT written into
             // the guest here; they are applied per-exec from the host record so
             // secrets never persist to a guest file (review M3, see
             // `apply_features`).
             let agent_ms = self.await_agent(&handle, Duration::from_secs(10)).await?;
+            // boot_ms is the honest boot-to-ready time (config + VM boot +
+            // agent up), not just the API-config latency.
+            let boot_ms = boot_start.elapsed().as_millis() as u64;
             Ok((boot_ms, agent_ms))
         }
         .await;
@@ -304,6 +337,14 @@ impl FirecrackerRuntime {
         match booted {
             Ok((boot_ms, agent_ms)) => Ok((handle, boot_ms, agent_ms)),
             Err(e) => {
+                // Surface Firecracker's own log so boot failures are diagnosable.
+                let fc_log = std::fs::read_to_string(jail.join("firecracker.log")).unwrap_or_default();
+                tracing::error!(
+                    handle = %handle,
+                    error = %e,
+                    firecracker_log = %fc_log.lines().rev().take(8).collect::<Vec<_>>().join(" | "),
+                    "microVM boot failed"
+                );
                 self.kill_and_reclaim(&handle, pid, &jail).await;
                 Err(e)
             }

@@ -184,9 +184,10 @@ fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
 fn main() {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    // Announce readiness immediately on boot.
-    let _ = writeln!(stdout, "{}", serde_json::json!({"event": "agent_ready"}));
-    let _ = stdout.flush();
+    // Announce readiness on the console (stderr), NOT stdout — stdout is the
+    // vsock response stream (one agent process per connection via socat), so a
+    // banner there would corrupt the first response the host reads.
+    eprintln!("{}", serde_json::json!({"event": "agent_ready"}));
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,
