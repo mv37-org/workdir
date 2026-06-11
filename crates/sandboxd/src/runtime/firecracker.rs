@@ -265,28 +265,40 @@ impl FirecrackerRuntime {
         );
         stream.write_all(req.as_bytes()).await?;
         stream.flush().await?;
-        // We send `Connection: close`, so Firecracker closes after responding —
-        // read to EOF so error responses include the body (Firecracker's
-        // `fault_message`), which is essential for diagnosing failures.
         let mut resp = Vec::new();
         let mut buf = [0u8; 2048];
         loop {
             match tokio::time::timeout(Duration::from_secs(read_secs), stream.read(&mut buf)).await {
-                Ok(Ok(0)) => break,
-                Ok(Ok(n)) => resp.extend_from_slice(&buf[..n]),
+                Ok(Ok(0)) => break, // EOF
+                Ok(Ok(n)) => {
+                    resp.extend_from_slice(&buf[..n]);
+                    // Return as soon as the full status line + headers are in: a
+                    // 2xx needs nothing more. Waiting for the server to close the
+                    // connection can add many seconds *after* a long snapshot
+                    // (Firecracker delays the close) — that was the entire cause
+                    // of the apparent multi-minute snapshot latency; the snapshot
+                    // itself is ~20s. Errors carry a body, which Firecracker sends
+                    // with the headers and then closes, so keep reading to capture
+                    // the fault_message in that case.
+                    if resp.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&resp);
+                        let line = head.lines().next().unwrap_or("");
+                        if line.contains(" 200") || line.contains(" 201") || line.contains(" 204") {
+                            return Ok(());
+                        }
+                        // non-2xx: fall through and keep reading the (small) body
+                    }
+                }
                 Ok(Err(e)) => return Err(anyhow::Error::from(e).context("read firecracker api response")),
                 Err(_) => break, // read timeout — proceed with what we have
             }
         }
         let text = String::from_utf8_lossy(&resp);
         let status = text.lines().next().unwrap_or("");
-        if !(status.contains(" 200") || status.contains(" 201") || status.contains(" 204")) {
-            // Include the response body (Firecracker's fault_message) after the
-            // headers, so the error is actionable.
-            let body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim();
-            bail!("firecracker api {method} {path} failed: {} {}", status.trim(), body);
-        }
-        Ok(())
+        // Include the response body (Firecracker's fault_message) after the
+        // headers, so the error is actionable.
+        let body = text.split("\r\n\r\n").nth(1).unwrap_or("").trim();
+        bail!("firecracker api {method} {path} failed: {} {}", status.trim(), body);
     }
 
     /// One request/response with the guest agent over the vsock-backed UDS,
