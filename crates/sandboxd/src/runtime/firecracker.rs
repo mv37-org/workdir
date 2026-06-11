@@ -116,6 +116,8 @@ pub struct FirecrackerRuntime {
     images_dir: PathBuf,
     workspaces: Workspaces,
     chroot_base: PathBuf,
+    use_jailer: bool,
+    jailer_uid_base: u32,
     next_cid: AtomicU32,
     next_tap: AtomicU32,
     vms: Mutex<HashMap<String, VmRecord>>,
@@ -130,6 +132,8 @@ impl FirecrackerRuntime {
             images_dir: cfg.images_dir.clone(),
             workspaces: Workspaces::new(cfg.workspace_dir.clone()),
             chroot_base: cfg.workspace_dir.join("jail"),
+            use_jailer: cfg.use_jailer,
+            jailer_uid_base: cfg.jailer_uid_base,
             next_cid: AtomicU32::new(3), // CIDs 0-2 are reserved
             next_tap: AtomicU32::new(0),
             vms: Mutex::new(HashMap::new()),
@@ -261,27 +265,12 @@ impl FirecrackerRuntime {
         let cid = self.next_cid.fetch_add(1, Ordering::SeqCst);
         let jail = self.chroot_base.join(&handle);
         std::fs::create_dir_all(&jail).context("create jail dir")?;
-        let api_sock = jail.join("api.sock");
-        let vsock_uds = jail.join("vsock.sock");
         self.workspaces.create(&handle)?;
-
-        // Copy-on-write overlay of the read-only rootfs for the writable disk.
         let rootfs = self.rootfs_path(spec);
-        let overlay = jail.join("overlay.ext4");
-        let _ = tokio::process::Command::new("cp")
-            .args(["--reflink=auto"])
-            .arg(&rootfs)
-            .arg(&overlay)
-            .status()
-            .await
-            .context("create COW overlay (is the rootfs present?)")?;
 
-        // Launch Firecracker directly with its API socket. The microVM is the
-        // isolation boundary; the jailer (chroot + per-VM uid/gid + cgroups) is
-        // defense-in-depth that layers on later — see deploy notes. Firecracker
-        // refuses a pre-existing API socket, so clear it first.
-        // Per-VM tap on the host bridge, for NAT egress. Snapshot restores reuse
-        // the snapshot's NIC config, so only set up a tap on a fresh boot.
+        // Per-VM tap on the host bridge, for NAT egress (common to both launch
+        // modes). Snapshot restores reuse the snapshot's NIC, so tap only on a
+        // fresh boot.
         let tap_idx = self.next_tap.fetch_add(1, Ordering::SeqCst);
         let tap = format!("wdtap{tap_idx}");
         let guest_ip = guest_ip(tap_idx);
@@ -293,17 +282,78 @@ impl FirecrackerRuntime {
             run_ip(&["link", "set", &tap, "up"]).await.context("bring tap up")?;
         }
 
-        let _ = std::fs::remove_file(&api_sock);
-        let log = std::fs::File::create(jail.join("firecracker.log")).context("fc log")?;
-        let log2 = log.try_clone().context("fc log clone")?;
-        let child = tokio::process::Command::new(&self.firecracker_bin)
-            .args(["--api-sock", api_sock.to_str().unwrap()])
-            .stdout(log)
-            .stderr(log2)
-            .spawn()
-            .context("spawn firecracker (requires /dev/kvm)")?;
-        let pid = child.id();
-        let _ = &self.jailer_bin; // (jailer install retained for the hardening follow-up)
+        // Launch Firecracker — directly, or wrapped by the jailer (chroot +
+        // per-VM uid/gid + cgroups) when `use_jailer`. `*_fc` are the paths
+        // Firecracker itself uses (chroot-relative under the jailer); `api_sock`
+        // / `vsock_uds` are the host-side paths the daemon connects to.
+        let (api_sock, vsock_uds, kernel_fc, rootfs_fc, vsock_fc, pid) = if self.use_jailer {
+            // The jailer chroots to <base>/firecracker/<id>/root, drops to
+            // uid/gid, and starts Firecracker there. Requires the daemon to run
+            // as root. We stage the kernel + overlay into the chroot once it
+            // exists, then reference them by chroot-relative path.
+            let jail_id = handle.replace('_', "-");
+            let uid = self.jailer_uid_base + tap_idx;
+            let chroot_root = self.chroot_base.join("firecracker").join(&jail_id).join("root");
+            let log = std::fs::File::create(jail.join("firecracker.log")).context("fc log")?;
+            let log2 = log.try_clone().context("fc log clone")?;
+            let child = tokio::process::Command::new(&self.jailer_bin)
+                .args(["--id", &jail_id])
+                .args(["--exec-file", &self.firecracker_bin])
+                .args(["--uid", &uid.to_string(), "--gid", &uid.to_string()])
+                .args(["--chroot-base-dir", self.chroot_base.to_str().unwrap()])
+                .args(["--", "--api-sock", "api.sock"])
+                .stdout(log)
+                .stderr(log2)
+                .spawn()
+                .context("spawn jailer (the daemon must run as root for the jailer)")?;
+            let pid = child.id();
+            for _ in 0..400 {
+                if chroot_root.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let kdst = chroot_root.join("vmlinux");
+            let rdst = chroot_root.join("rootfs.ext4");
+            tokio::process::Command::new("cp").arg(&self.kernel_image).arg(&kdst).status().await
+                .context("stage kernel into chroot")?;
+            tokio::process::Command::new("cp").args(["--reflink=auto"]).arg(&rootfs).arg(&rdst).status().await
+                .context("stage rootfs into chroot")?;
+            let owner = format!("{uid}:{uid}");
+            let _ = tokio::process::Command::new("chown").arg(&owner).arg(&kdst).arg(&rdst).status().await;
+            (
+                chroot_root.join("api.sock"),
+                chroot_root.join("vsock.sock"),
+                "vmlinux".to_string(),
+                "rootfs.ext4".to_string(),
+                "vsock.sock".to_string(),
+                pid,
+            )
+        } else {
+            // Direct launch (default). The microVM is the isolation boundary.
+            let api_sock = jail.join("api.sock");
+            let vsock_uds = jail.join("vsock.sock");
+            let overlay = jail.join("overlay.ext4");
+            tokio::process::Command::new("cp").args(["--reflink=auto"]).arg(&rootfs).arg(&overlay).status().await
+                .context("create COW overlay (is the rootfs present?)")?;
+            let _ = std::fs::remove_file(&api_sock);
+            let log = std::fs::File::create(jail.join("firecracker.log")).context("fc log")?;
+            let log2 = log.try_clone().context("fc log clone")?;
+            let child = tokio::process::Command::new(&self.firecracker_bin)
+                .args(["--api-sock", api_sock.to_str().unwrap()])
+                .stdout(log)
+                .stderr(log2)
+                .spawn()
+                .context("spawn firecracker (requires /dev/kvm)")?;
+            (
+                api_sock,
+                vsock_uds.clone(),
+                self.kernel_image.clone(),
+                overlay.to_string_lossy().into_owned(),
+                vsock_uds.to_string_lossy().into_owned(),
+                child.id(),
+            )
+        };
 
         self.vms.lock().unwrap().insert(
             handle.clone(),
@@ -335,9 +385,10 @@ impl FirecrackerRuntime {
             let vcpus = spec.resources.cpu.ceil().max(1.0) as u32;
 
             // Always wire the vsock device so the host can reach the guest agent.
+            // uds_path is what Firecracker creates (chroot-relative under jailer).
             self.fc_api(&api_sock, "PUT", "/vsock", &json!({
                 "guest_cid": cid,
-                "uds_path": vsock_uds.to_str().unwrap(),
+                "uds_path": vsock_fc,
             })).await?;
 
             let boot_start = Instant::now();
@@ -360,12 +411,12 @@ impl FirecrackerRuntime {
                      wd.ip={guest_ip} wd.gw={NET_GATEWAY} wd.dns={NET_DNS} init=/sbin/sandbox-init"
                 );
                 self.fc_api(&api_sock, "PUT", "/boot-source", &json!({
-                    "kernel_image_path": self.kernel_image,
+                    "kernel_image_path": kernel_fc,
                     "boot_args": boot_args,
                 })).await?;
                 self.fc_api(&api_sock, "PUT", "/drives/rootfs", &json!({
                     "drive_id": "rootfs",
-                    "path_on_host": overlay.to_str().unwrap(),
+                    "path_on_host": rootfs_fc,
                     "is_root_device": true,
                     "is_read_only": false,
                 })).await?;
@@ -508,7 +559,15 @@ impl FirecrackerRuntime {
             let _ = run_ip(&["link", "del", &tap]).await;
         }
         let _ = std::fs::remove_dir_all(jail);
+        if self.use_jailer {
+            let _ = std::fs::remove_dir_all(self.jailer_chroot(handle));
+        }
         self.workspaces.remove(handle).ok();
+    }
+
+    /// The jailer's chroot directory for a VM handle.
+    fn jailer_chroot(&self, handle: &str) -> PathBuf {
+        self.chroot_base.join("firecracker").join(handle.replace('_', "-"))
     }
 }
 
@@ -688,6 +747,9 @@ impl Runtime for FirecrackerRuntime {
         }
         self.workspaces.remove(handle).ok();
         let _ = std::fs::remove_dir_all(self.chroot_base.join(handle));
+        if self.use_jailer {
+            let _ = std::fs::remove_dir_all(self.jailer_chroot(handle));
+        }
         Ok(())
     }
 }

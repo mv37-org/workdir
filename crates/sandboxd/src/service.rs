@@ -133,17 +133,9 @@ pub async fn create_sandbox(
     let snapshots = gather_node_snapshots(state, &placement_req).await?;
     let placement = scheduler::select(&placement_req, &snapshots)
         .map_err(|r| ApiError::NoCapacity { reason: r.reason, detail: r.detail })?;
-    if placement.node_id != state.local_node_id {
-        // Single control-plane build executes the data path locally. Remote
-        // worker execution is the documented multi-node extension.
-        return Err(ApiError::NoCapacity {
-            reason: "remote_placement_unsupported".into(),
-            detail: format!(
-                "scheduler chose node {} but worker data-plane RPC is not enabled in this build",
-                placement.node_id
-            ),
-        });
-    }
+    // The chosen node's data-plane client: local if it's us, else a remote
+    // worker driven over its /internal API (multi-node).
+    let node = state.node_for(&placement.node_id);
 
     // --- build the runtime spec -----------------------------------------
     let mut env: BTreeMap<String, String> = BTreeMap::new();
@@ -200,7 +192,7 @@ pub async fn create_sandbox(
     // Snapshot availability is per-shape; the reference build does not keep a
     // curated snapshot cache, so cold boot is used when no warm VM is claimed.
     let snapshot_available = false;
-    let instance = match state.local.place(&spec, snapshot_available).await {
+    let instance = match node.place(&spec, snapshot_available).await {
         Ok(i) => i,
         Err(e) => {
             sb.state = State::Failed;
@@ -228,7 +220,7 @@ pub async fn create_sandbox(
     if browser.is_some() {
         for p in [6080u16, 9222u16] {
             if !sb.ports.contains(&p) {
-                let _ = state.local.expose_port(instance.handle.as_str(), p).await;
+                let _ = node.expose_port(instance.handle.as_str(), p).await;
                 sb.ports.push(p);
             }
         }
@@ -282,6 +274,8 @@ async fn run_startup(state: &AppState, sb: &mut Sandbox, recipe: &StartupRecipe)
         Some(h) => h.clone(),
         None => return,
     };
+    // Route startup ops to the node the sandbox actually runs on.
+    let node = state.node_for(sb.node_id.as_deref().unwrap_or(""));
 
     // git clone (shallow) ------------------------------------------------
     if let Some(git) = &recipe.git {
@@ -290,8 +284,7 @@ async fn run_startup(state: &AppState, sb: &mut Sandbox, recipe: &StartupRecipe)
             "git clone --depth {} --branch {} {} . 2>&1 || git clone --depth {} {} .",
             git.depth, git.r#ref, shell_arg(&git.url), git.depth, shell_arg(&git.url)
         );
-        let res = state
-            .local
+        let res = node
             .exec(&handle, &ExecRequest { cmd, cwd: None, env: BTreeMap::new(), background: false })
             .await;
         sb.timings.git_ms = t.elapsed().as_millis() as u64;
@@ -307,8 +300,7 @@ async fn run_startup(state: &AppState, sb: &mut Sandbox, recipe: &StartupRecipe)
     // commands (install etc.) -------------------------------------------
     let t = Instant::now();
     for cmd in &recipe.commands {
-        let _ = state
-            .local
+        let _ = node
             .exec(
                 &handle,
                 &ExecRequest {
@@ -326,7 +318,7 @@ async fn run_startup(state: &AppState, sb: &mut Sandbox, recipe: &StartupRecipe)
 
     // port preview -------------------------------------------------------
     for &port in &recipe.ports {
-        if state.local.expose_port(&handle, port).await.is_ok() && !sb.ports.contains(&port) {
+        if node.expose_port(&handle, port).await.is_ok() && !sb.ports.contains(&port) {
             sb.ports.push(port);
         }
     }
@@ -335,7 +327,7 @@ async fn run_startup(state: &AppState, sb: &mut Sandbox, recipe: &StartupRecipe)
     if let Some(ready) = &recipe.ready {
         if let Some(url) = &ready.http {
             let t = Instant::now();
-            let _ = state.local.ready_check(&handle, url, ready.timeout_seconds).await;
+            let _ = node.ready_check(&handle, url, ready.timeout_seconds).await;
             sb.timings.ready_ms = t.elapsed().as_millis() as u64;
         }
     }
@@ -543,7 +535,8 @@ pub async fn stop_sandbox(state: &AppState, sb: Sandbox) -> ApiResult<Sandbox> {
     close_usage(state, &updated.id);
 
     let handle = updated.runtime_handle.clone().unwrap_or_default();
-    let pause_result = state.local.pause(&handle, updated.snapshot_enabled).await;
+    let node = state.node_for(updated.node_id.as_deref().unwrap_or(""));
+    let pause_result = node.pause(&handle, updated.snapshot_enabled).await;
     let next = if pause_result.is_ok() { State::Stopped } else { State::Failed };
     let err = pause_result.as_ref().err().map(|e| format!("pause failed: {e}"));
     let final_sb = state
@@ -574,7 +567,8 @@ pub async fn resume_sandbox(state: &AppState, sb: Sandbox) -> ApiResult<Sandbox>
         CasOutcome::NotFound => return Err(ApiError::NotFound(format!("sandbox {}", sb.id))),
     };
     let handle = resuming.runtime_handle.clone().unwrap_or_default();
-    let resume_ms = match state.local.resume(&handle).await {
+    let node = state.node_for(resuming.node_id.as_deref().unwrap_or(""));
+    let resume_ms = match node.resume(&handle).await {
         Ok(ms) => ms,
         Err(e) => {
             state
@@ -627,8 +621,9 @@ pub async fn delete_sandbox(state: &AppState, sb: Sandbox) -> ApiResult<()> {
     close_usage(state, &deleting.id);
 
     let handle = deleting.runtime_handle.clone().unwrap_or_default();
+    let node = state.node_for(deleting.node_id.as_deref().unwrap_or(""));
     if !handle.is_empty() {
-        if let Err(e) = state.local.delete(&handle).await {
+        if let Err(e) = node.delete(&handle).await {
             // Don't block the user's delete on a runtime hiccup; mark deleted and
             // log the potential leak for a sweeper to reclaim.
             tracing::warn!(sandbox = %deleting.id, error = %e, "runtime delete failed; marking deleted anyway");
@@ -653,7 +648,8 @@ pub async fn snapshot_sandbox(state: &AppState, sb: &Sandbox) -> ApiResult<Snaps
         ));
     }
     let handle = sb.runtime_handle.clone().unwrap_or_default();
-    let artifact = state.local.snapshot(&handle).await.map_err(ApiError::Internal)?;
+    let node = state.node_for(sb.node_id.as_deref().unwrap_or(""));
+    let artifact = node.snapshot(&handle).await.map_err(ApiError::Internal)?;
     let snap = Snapshot {
         id: artifact.handle.clone(),
         sandbox_id: sb.id.clone(),

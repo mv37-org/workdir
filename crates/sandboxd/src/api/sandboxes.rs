@@ -4,7 +4,6 @@ use crate::api::load_owned;
 use crate::auth::AuthContext;
 use crate::error::{ApiError, ApiResult};
 use crate::model::CreateSandboxRequest;
-use crate::node::NodeClient;
 use crate::runtime::ExecRequest;
 use crate::service;
 use crate::state::AppState;
@@ -84,7 +83,7 @@ pub async fn exec(
     // mistaken for idle (review #7).
     service::touch_activity(&state, &mut sb);
     let result = state
-        .local
+        .node_for(sb.node_id.as_deref().unwrap_or(""))
         .exec(
             &handle,
             &ExecRequest { cmd: body.cmd, cwd: body.cwd, env: body.env, background: body.background },
@@ -112,7 +111,7 @@ pub async fn read_file(
 ) -> ApiResult<Json<Value>> {
     let sb = load_owned(&state, &ctx, &id)?;
     let handle = sb.runtime_handle.clone().ok_or_else(|| ApiError::Conflict("no runtime handle".into()))?;
-    let bytes = state.local.read_file(&handle, &q.path).await.map_err(ApiError::Internal)?;
+    let bytes = state.node_for(sb.node_id.as_deref().unwrap_or("")).read_file(&handle, &q.path).await.map_err(ApiError::Internal)?;
     let body = match String::from_utf8(bytes.clone()) {
         Ok(text) => json!({ "path": q.path, "encoding": "utf8", "content": text }),
         Err(_) => json!({ "path": q.path, "encoding": "base64", "content": base64(&bytes) }),
@@ -142,7 +141,7 @@ pub async fn write_file(
         _ => body.content.into_bytes(),
     };
     let len = bytes.len();
-    state.local.write_file(&handle, &body.path, &bytes).await.map_err(ApiError::Internal)?;
+    state.node_for(sb.node_id.as_deref().unwrap_or("")).write_file(&handle, &body.path, &bytes).await.map_err(ApiError::Internal)?;
     Ok(Json(json!({ "path": body.path, "written": true, "bytes": len })))
 }
 
@@ -153,7 +152,7 @@ pub async fn expose_port(
 ) -> ApiResult<Json<Value>> {
     let mut sb = load_owned(&state, &ctx, &id)?;
     let handle = sb.runtime_handle.clone().ok_or_else(|| ApiError::Conflict("no runtime handle".into()))?;
-    state.local.expose_port(&handle, port).await.map_err(ApiError::Internal)?;
+    state.node_for(sb.node_id.as_deref().unwrap_or("")).expose_port(&handle, port).await.map_err(ApiError::Internal)?;
     if !sb.ports.contains(&port) {
         sb.ports.push(port);
         sb.updated_at = chrono::Utc::now();

@@ -1,7 +1,8 @@
 //! Shared application state handed to every request handler.
 
 use crate::config::Config;
-use crate::node::LocalNode;
+use crate::node::{LocalNode, NodeClient};
+use crate::remote::RemoteNodeClient;
 use crate::store::Store;
 use std::sync::Arc;
 
@@ -34,6 +35,26 @@ impl Inner {
         match self.cfg.server.public_port {
             Some(p) if p != default_port => format!("{scheme}://{host}:{p}"),
             _ => format!("{scheme}://{host}"),
+        }
+    }
+
+    /// Resolve the data-plane client for a node: the in-process [`LocalNode`] if
+    /// it's this node, else a [`RemoteNodeClient`] that drives the worker over
+    /// its `/internal` API. This is how the control plane forwards runtime ops
+    /// to whichever node the scheduler placed a sandbox on.
+    pub fn node_for(&self, node_id: &str) -> Arc<dyn NodeClient> {
+        if node_id == self.local_node_id {
+            return self.local.clone();
+        }
+        match self.store.get_node(node_id) {
+            Ok(Some(n)) if !n.advertise_addr.is_empty() => Arc::new(RemoteNodeClient::new(
+                node_id,
+                n.advertise_addr,
+                self.cfg.node.rpc_token.clone(),
+                self.http.clone(),
+            )),
+            // Unknown/addressless node: fall back to local (single-node default).
+            _ => self.local.clone(),
         }
     }
 }

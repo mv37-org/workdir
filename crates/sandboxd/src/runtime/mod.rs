@@ -20,7 +20,7 @@ use std::net::SocketAddr;
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 
 /// Everything the runtime needs to boot one microVM.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VmSpec {
     pub sandbox_id: String,
     pub org_id: String,
@@ -45,7 +45,7 @@ pub struct VmSpec {
 }
 
 /// A pre-booted warm microVM waiting in a hot pool.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WarmVm {
     pub handle: String,
     pub image_key: String,
@@ -53,7 +53,7 @@ pub struct WarmVm {
 }
 
 /// A live microVM instance, with the timings the boot incurred.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VmInstance {
     pub handle: String,
     pub boot_path: BootPath,
@@ -64,7 +64,7 @@ pub struct VmInstance {
     pub agent_ms: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExecRequest {
     pub cmd: String,
     pub cwd: Option<String>,
@@ -72,20 +72,20 @@ pub struct ExecRequest {
     pub background: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExecResult {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DirEntry {
     pub name: String,
     pub dir: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SnapshotArtifact {
     pub handle: String,
     pub storage_bytes: u64,

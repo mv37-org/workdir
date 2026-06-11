@@ -48,6 +48,10 @@ pub struct NodeConfig {
     pub control_plane_url: String,
     /// Join token presented to the control plane.
     pub join_token: String,
+    /// Shared cluster secret authenticating control-plane↔worker RPC (the
+    /// `/internal` node API). Empty disables the internal API (single-node).
+    /// Must be identical on the control plane and every worker.
+    pub rpc_token: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,6 +61,15 @@ pub struct RuntimeConfig {
     pub kind: String,
     pub firecracker_bin: String,
     pub jailer_bin: String,
+    /// Run Firecracker under the jailer (chroot + per-VM uid/gid + cgroups) for
+    /// defense-in-depth. Requires the daemon to run as root (the jailer sets up
+    /// the chroot and drops privileges). Default false = launch Firecracker
+    /// directly; the microVM is still the isolation boundary.
+    #[serde(default)]
+    pub use_jailer: bool,
+    /// Base uid/gid for per-VM jailer isolation; each VM gets base+index.
+    #[serde(default = "default_jailer_uid")]
+    pub jailer_uid_base: u32,
     pub kernel_image: String,
     /// Directory holding curated/custom rootfs artifacts and snapshots.
     pub images_dir: PathBuf,
@@ -105,6 +118,7 @@ impl Default for NodeConfig {
             total_memory_gb: 0.0,
             control_plane_url: String::new(),
             join_token: String::new(),
+            rpc_token: String::new(),
         }
     }
 }
@@ -118,12 +132,18 @@ impl Default for RuntimeConfig {
             kind: default_kind.to_string(),
             firecracker_bin: "/usr/local/bin/firecracker".to_string(),
             jailer_bin: "/usr/local/bin/jailer".to_string(),
+            use_jailer: false,
+            jailer_uid_base: default_jailer_uid(),
             // Empty paths are filled relative to `data_dir` in `Config::load`.
             kernel_image: String::new(),
             images_dir: PathBuf::new(),
             workspace_dir: PathBuf::new(),
         }
     }
+}
+
+fn default_jailer_uid() -> u32 {
+    100_000
 }
 
 impl Default for HotPoolConfig {
@@ -170,6 +190,9 @@ impl Config {
         }
         if let Ok(v) = std::env::var("WORKDIR_ADMIN_KEY") {
             cfg.auth.bootstrap_admin_key = v;
+        }
+        if let Ok(v) = std::env::var("WORKDIR_RPC_TOKEN") {
+            cfg.node.rpc_token = v;
         }
         // Derive runtime storage paths from data_dir when not explicitly set, so
         // a single `data_dir` is enough to run anywhere (dev or production).

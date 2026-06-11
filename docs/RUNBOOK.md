@@ -157,11 +157,44 @@ Sandboxes are ephemeral by design — losing the node loses running sandboxes
 
 ---
 
-## 7. Known follow-ups
+## 7. Browser sandboxes
 
-- **Browser image** not built (browser/VNC sandboxes unavailable).
-- **Jailer hardening** — Firecracker runs without the jailer today; the microVM
-  is the isolation boundary. Adding jailer (chroot + per-VM uid/gid + cgroups) is
-  defense-in-depth.
-- **Multi-node** — registry/scheduler span nodes, but the control-plane→worker
-  execution RPC isn't wired, so scaling is vertical (one bigger box) for now.
+`browser` image = Chromium + Playwright + Xvfb + fluxbox + x11vnc + noVNC. The
+guest init starts the stack and forwards CDP (Chrome binds it to loopback) to
+the guest IP. Build it like any image:
+
+```bash
+sudo bash deploy/build-image.sh browser 8G   # ~1.6 GB; min shape 2 vCPU / 4 GB / 16 GB
+sudo systemctl restart workdir                # browser hot pool now warms
+```
+
+A browser sandbox auto-exposes noVNC (6080) and CDP (9222) preview routes; the
+create response carries the URLs.
+
+## 8. Jailer hardening (opt-in)
+
+By default Firecracker is launched directly — the microVM is the isolation
+boundary. For defense-in-depth (chroot + per-VM uid/gid + cgroups), set in
+`[runtime]`:
+
+```toml
+use_jailer = true
+jailer_uid_base = 100000
+```
+
+The jailer sets up the chroot and drops privileges, so the daemon must run as
+**root** when this is on (adjust the systemd `User=`/capabilities accordingly).
+
+## 9. Multi-node (horizontal scaling)
+
+The scheduler/registry span nodes; with the worker RPC, the control plane
+forwards data-plane ops to whichever node it places a sandbox on.
+
+- Set the **same** `node.rpc_token` (shared secret) on the control plane and
+  every worker — it authenticates the `/internal` RPC. Empty = single-node
+  (internal API disabled).
+- A worker registers via join token; the control plane reaches it at the node's
+  `advertise_addr` and forwards create/exec/files/lifecycle.
+- Limitations today: PTY and the preview proxy are served for **local** sandboxes
+  only; remote PTY/preview proxying is the next step. Validate on two boxes
+  before relying on it.

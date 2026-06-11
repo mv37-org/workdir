@@ -4,6 +4,7 @@
 
 pub mod admin;
 pub mod images;
+pub mod internal;
 pub mod nodes;
 pub mod preview;
 pub mod pty;
@@ -62,6 +63,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .nest("/v1", v1)
+        // Control-plane↔worker RPC (token-authed; disabled without node.rpc_token).
+        .nest("/internal", internal::router(state.clone()))
         // Path-based preview for environments without wildcard DNS (dev/tests).
         .route("/_preview/:id/:port", get(preview::preview_path).post(preview::preview_path))
         .route("/_preview/:id/:port/*rest", get(preview::preview_path).post(preview::preview_path))
