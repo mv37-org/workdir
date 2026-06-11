@@ -73,6 +73,8 @@ struct VmRecord {
     image_key: String,
     /// Host tap device for this VM's NIC, removed on teardown.
     tap: Option<String>,
+    /// Guest IP (on the bridge) the preview proxy dials for HTTP/VNC/CDP.
+    guest_ip: Option<String>,
     /// Env applied to every exec: startup env + injected secrets. Kept in host
     /// memory and passed per-exec so secrets never persist to a guest env file
     /// or land in a snapshot (review M3).
@@ -368,6 +370,7 @@ impl FirecrackerRuntime {
                 pid,
                 image_key: spec.image_key.clone(),
                 tap: if snapshot.is_none() { Some(tap.clone()) } else { None },
+                guest_ip: if snapshot.is_none() { Some(guest_ip.clone()) } else { None },
                 resident_env: Default::default(),
                 has_secrets: false,
             },
@@ -699,12 +702,15 @@ impl Runtime for FirecrackerRuntime {
             .collect())
     }
 
-    async fn expose_port(&self, _handle: &str, port: u16) -> Result<SocketAddr> {
-        // The guest's private IP is reachable via the host's NAT/netns. The
-        // installer programs nftables so the preview proxy can dial the guest IP
-        // on the requested port. Here we return the in-namespace upstream; the
-        // proxy resolves the guest IP from the VM record's tap config.
-        Ok(SocketAddr::from(([127, 0, 0, 1], port)))
+    async fn expose_port(&self, handle: &str, port: u16) -> Result<SocketAddr> {
+        // Services run INSIDE the guest, on its bridge IP (10.200.0.x) — not on
+        // the host loopback. The host reaches it directly over wdbr0. Return the
+        // guest IP so the preview proxy dials the VM, not the host.
+        let ip = self.vms.lock().unwrap().get(handle).and_then(|r| r.guest_ip.clone());
+        match ip.and_then(|s| s.parse::<std::net::IpAddr>().ok()) {
+            Some(ip) => Ok(SocketAddr::new(ip, port)),
+            None => Ok(SocketAddr::from(([127, 0, 0, 1], port))), // snapshot/no-tap fallback
+        }
     }
 
     async fn ready_check(&self, handle: &str, url: &str, timeout_seconds: u32) -> Result<()> {
