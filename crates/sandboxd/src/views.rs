@@ -67,6 +67,9 @@ pub fn sandbox_view(state: &AppState, sb: &Sandbox) -> Value {
     if sb.timings.browser_ready_ms > 0 {
         v["browser_ready_ms"] = json!(sb.timings.browser_ready_ms);
     }
+    if let Some(agent) = &sb.coding_agent {
+        v["coding_agent"] = Value::String(agent.clone());
+    }
     if let Some(err) = &sb.error {
         v["error"] = Value::String(err.clone());
     }

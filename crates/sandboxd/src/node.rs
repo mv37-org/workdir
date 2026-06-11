@@ -96,6 +96,7 @@ impl LocalNode {
                 secret_env: Default::default(),
                 browser: None,
                 docker: false,
+                coding_agent: None,
                 mounts: Vec::new(),
                 files: Vec::new(),
             };

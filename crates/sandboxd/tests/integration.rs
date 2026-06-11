@@ -263,6 +263,37 @@ async fn docker_requires_capable_image() {
 }
 
 #[tokio::test]
+async fn coding_agent_is_opt_in_and_validated() {
+    let (base, key, _tmp) = spawn_server().await;
+    let c = client();
+    let auth = format!("Bearer {key}");
+
+    // Default create has no coding agent — sandboxes stay minimal.
+    let plain: serde_json::Value = c
+        .post(format!("{base}/v1/sandboxes"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({}))
+        .send().await.unwrap().json().await.unwrap();
+    assert!(plain.get("coding_agent").is_none());
+
+    // An unknown agent kind is rejected.
+    let r = c
+        .post(format!("{base}/v1/sandboxes"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({"coding_agent": {"enabled": true, "kind": "cursor"}}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 400);
+
+    // Opting in installs opencode (works on the base image) and is reflected.
+    let sb: serde_json::Value = c
+        .post(format!("{base}/v1/sandboxes"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({"coding_agent": {"enabled": true}}))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(sb["coding_agent"], serde_json::json!("opencode"));
+}
+
+#[tokio::test]
 async fn browser_requires_explicit_resources_and_image() {
     let (base, key, _tmp) = spawn_server().await;
     let c = client();

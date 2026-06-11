@@ -22,6 +22,14 @@
  *       ready: { http: "http://127.0.0.1:3000", timeout_seconds: 30 },
  *     },
  *   });
+ *
+ * Opt in to an in-sandbox coding agent (opencode), installed on demand:
+ *
+ *   const sandbox = await client.sandboxes.create({
+ *     codingAgent: { enabled: true },
+ *     startup: { secrets: ["ANTHROPIC_API_KEY"] },
+ *   });
+ *   await sandbox.exec("opencode run 'add a test for utils.py'");
  */
 
 export interface ResourcesInput {
@@ -56,6 +64,12 @@ export interface CreateOptions {
   image_version?: string;
   /** Run dockerd inside the guest microVM (needs a docker-capable image). */
   docker?: { enabled: boolean };
+  /**
+   * Install a lightweight coding-agent CLI (opencode) into the guest. Opt-in —
+   * not present unless requested. Pass a provider key via `startup.secrets`
+   * (e.g. ANTHROPIC_API_KEY) to make it usable.
+   */
+  codingAgent?: { enabled: boolean; kind?: "opencode"; version?: string };
   /** S3 bucket mounts; credentials come from injected secret env. */
   mounts?: MountInput[];
   /** Inline ephemeral files written into the workspace at boot. */
@@ -175,8 +189,10 @@ class Sandboxes {
   constructor(private http: Http) {}
 
   async create(options: CreateOptions = {}): Promise<Sandbox> {
-    const body: Record<string, unknown> = { ...options };
+    const { codingAgent, ...rest } = options;
+    const body: Record<string, unknown> = { ...rest };
     if (options.resources) body.resources = toWireResources(options.resources);
+    if (codingAgent) body.coding_agent = codingAgent;
     const data = await this.http.request("POST", "/v1/sandboxes", body);
     return new Sandbox(this.http, data);
   }

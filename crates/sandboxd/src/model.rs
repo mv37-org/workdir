@@ -36,6 +36,9 @@ pub struct Timings {
     pub image_cache_ms: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub browser_ready_ms: u64,
+    /// Time spent installing the opt-in coding agent (0 unless requested).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub agent_ms: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub git_ms: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -157,6 +160,33 @@ pub struct BrowserConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Coding agent (feature): a lightweight in-sandbox coding-agent CLI (opencode by
+// default). Opt-in — it is NOT baked into the base rootfs, so most sandboxes
+// stay minimal; when requested it is installed into the guest at provision time.
+// Provide a provider API key via `startup.secrets` (e.g. ANTHROPIC_API_KEY) to
+// make it usable.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CodingAgentConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Which agent CLI to install. Currently only "opencode" (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Optional version to pin; defaults to the installer's latest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+impl CodingAgentConfig {
+    /// The agent CLI to install, defaulting to opencode.
+    pub fn kind(&self) -> &str {
+        self.kind.as_deref().unwrap_or("opencode")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Docker-in-Docker (feature): dockerd runs INSIDE the guest microVM. The VM is
 // the isolation boundary; the host Docker socket is never exposed (spec §18).
 // ---------------------------------------------------------------------------
@@ -235,6 +265,10 @@ pub struct CreateSandboxRequest {
     /// Run dockerd inside the guest microVM (docker-in-docker).
     #[serde(default)]
     pub docker: Option<DockerConfig>,
+    /// Install a lightweight coding-agent CLI (opencode) into the guest. Opt-in;
+    /// not present unless requested.
+    #[serde(default)]
+    pub coding_agent: Option<CodingAgentConfig>,
     /// Bucket mounts to attach inside the guest.
     #[serde(default)]
     pub mounts: Option<Vec<MountSpec>>,
@@ -270,6 +304,9 @@ pub struct Sandbox {
     /// Whether dockerd is running inside the guest.
     #[serde(default)]
     pub docker: bool,
+    /// The coding-agent CLI installed in the guest (e.g. "opencode"), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coding_agent: Option<String>,
     /// Bucket mounts attached to the guest (no credentials).
     #[serde(default)]
     pub mounts: Vec<MountSpec>,

@@ -409,8 +409,9 @@ impl FirecrackerRuntime {
     }
 
     /// Apply per-sandbox features to a booted (warm or cold) VM: resident env +
-    /// secrets, inline ephemeral files, docker-in-docker, and bucket mounts.
-    async fn apply_features(&self, handle: &str, spec: &VmSpec) -> Result<()> {
+    /// secrets, inline ephemeral files, the opt-in coding agent, docker-in-docker,
+    /// and bucket mounts. Returns the coding-agent install time (0 if not asked).
+    async fn apply_features(&self, handle: &str, spec: &VmSpec) -> Result<u64> {
         // Resident env lives in the host record and is applied per-exec, so
         // secrets never persist to a guest env file or a snapshot (review M3).
         {
@@ -429,6 +430,23 @@ impl FirecrackerRuntime {
             let _ = self
                 .agent_call(handle, &json!({"op": "write_file", "path": jailed, "content_b64": b64}))
                 .await;
+        }
+
+        // Coding agent (opt-in): install a lightweight agent CLI into the guest.
+        // It is deliberately NOT baked into the rootfs, so we fetch it here only
+        // when requested. Pre-staging the binary in a layered image is the
+        // production speedup (see docs/FEATURES.md), but the honest default is to
+        // install on demand and time it separately.
+        let mut agent_ms = 0u64;
+        if let Some(agent) = &spec.coding_agent {
+            if agent.enabled {
+                let t = Instant::now();
+                let cmd = coding_agent_install_cmd(agent);
+                let _ = self
+                    .agent_call(handle, &json!({"op": "exec", "cmd": cmd, "background": false}))
+                    .await;
+                agent_ms = t.elapsed().as_millis() as u64;
+            }
         }
 
         // Docker-in-docker: start dockerd INSIDE the guest (the VM is the
@@ -477,7 +495,7 @@ impl FirecrackerRuntime {
                 }))
                 .await;
         }
-        Ok(())
+        Ok(agent_ms)
     }
 
     /// Kill a VM's jailer process and reclaim its jail dir + workspace + record.
@@ -528,9 +546,9 @@ impl Runtime for FirecrackerRuntime {
             (handle, boot_path, boot_ms)
         };
 
-        // Apply secrets/env, inline files, docker, and mounts to whichever VM we
-        // ended up with (warm or freshly booted).
-        self.apply_features(&handle, spec).await?;
+        // Apply secrets/env, inline files, the coding agent, docker, and mounts to
+        // whichever VM we ended up with (warm or freshly booted).
+        let coding_agent_ms = self.apply_features(&handle, spec).await?;
 
         let browser_ready_ms = if spec.browser.as_ref().map(|b| b.enabled).unwrap_or(false) {
             let start = Instant::now();
@@ -541,7 +559,7 @@ impl Runtime for FirecrackerRuntime {
         } else {
             0
         };
-        Ok(VmInstance { handle, boot_path, boot_ms, image_cache_ms: 0, browser_ready_ms })
+        Ok(VmInstance { handle, boot_path, boot_ms, image_cache_ms: 0, browser_ready_ms, agent_ms: coding_agent_ms })
     }
 
     async fn exec(&self, handle: &str, req: &ExecRequest) -> Result<ExecResult> {
@@ -676,6 +694,23 @@ impl Runtime for FirecrackerRuntime {
 
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Build the in-guest install command for the requested coding agent. Only
+/// opencode is supported today (validated upstream in the service layer). The
+/// installer drops the binary under `$HOME/.opencode/bin` (or `~/.local/bin`);
+/// we symlink it onto the PATH so plain `opencode` works from every `exec`.
+fn coding_agent_install_cmd(agent: &crate::model::CodingAgentConfig) -> String {
+    let version_export = match &agent.version {
+        Some(v) => format!("export VERSION={}; ", shell_quote(v)),
+        None => String::new(),
+    };
+    format!(
+        "{version_export}curl -fsSL https://opencode.ai/install | bash; \
+         for d in \"$HOME/.opencode/bin\" \"$HOME/.local/bin\"; do \
+           [ -x \"$d/opencode\" ] && ln -sf \"$d/opencode\" /usr/local/bin/opencode && break; \
+         done"
+    )
 }
 
 // Reuse the guest agent's base64 alphabet on the host side.

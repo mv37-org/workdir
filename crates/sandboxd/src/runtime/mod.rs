@@ -12,7 +12,7 @@ pub mod mock;
 pub mod workspace;
 
 use crate::knobs::Resources;
-use crate::model::{BootPath, BrowserConfig, MountSpec};
+use crate::model::{BootPath, BrowserConfig, CodingAgentConfig, MountSpec};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::BTreeMap;
@@ -36,6 +36,8 @@ pub struct VmSpec {
     pub browser: Option<BrowserConfig>,
     /// Run dockerd inside the guest.
     pub docker: bool,
+    /// Install a coding-agent CLI into the guest after boot (opt-in).
+    pub coding_agent: Option<CodingAgentConfig>,
     /// Bucket mounts to set up after boot.
     pub mounts: Vec<MountSpec>,
     /// Inline files to write into the workspace before startup commands run.
@@ -58,6 +60,8 @@ pub struct VmInstance {
     pub boot_ms: u64,
     pub image_cache_ms: u64,
     pub browser_ready_ms: u64,
+    /// Time spent installing the opt-in coding agent (0 if not requested).
+    pub agent_ms: u64,
 }
 
 #[derive(Debug, Clone)]

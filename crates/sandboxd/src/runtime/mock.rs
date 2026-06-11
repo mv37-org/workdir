@@ -110,8 +110,9 @@ impl Runtime for MockRuntime {
         };
 
         // Apply features: resident env (incl. secrets), inline files, simulated
-        // mounts. Docker-in-docker is a no-op in the dev runtime (needs a real
-        // guest kernel); it is recorded so the API reflects intent.
+        // mounts. Docker-in-docker and the opt-in coding agent are no-ops in the
+        // dev runtime (no real guest / no network install); intent is recorded on
+        // the sandbox record so the API still reflects it.
         let mut resident_env = spec.env.clone();
         resident_env.extend(spec.secret_env.clone());
         for (path, bytes) in &spec.files {
@@ -126,7 +127,7 @@ impl Runtime for MockRuntime {
             .unwrap()
             .insert(handle.clone(), VmState { paused: false, resident_env });
 
-        Ok(VmInstance { handle, boot_path, boot_ms, image_cache_ms, browser_ready_ms })
+        Ok(VmInstance { handle, boot_path, boot_ms, image_cache_ms, browser_ready_ms, agent_ms: 0 })
     }
 
     async fn exec(&self, handle: &str, req: &ExecRequest) -> Result<ExecResult> {

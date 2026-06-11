@@ -91,6 +91,19 @@ pub async fn create_sandbox(
         ));
     }
 
+    // Coding agent (opt-in): installed on demand, so it works on any image with
+    // curl + egress. Only opencode is supported today.
+    let coding_agent = req.coding_agent.clone().filter(|a| a.enabled);
+    if let Some(a) = &coding_agent {
+        if a.kind() != "opencode" {
+            return Err(ApiError::BadRequest(format!(
+                "unsupported coding agent '{}'; only 'opencode' is available",
+                a.kind()
+            )));
+        }
+    }
+    let coding_agent_kind = coding_agent.as_ref().map(|a| a.kind().to_string());
+
     // --- admission section (serialized; review #1) ----------------------
     // Hold the admission lock across quota + capacity check and the reservation
     // of the `creating` row, so concurrent creates cannot both pass a stale
@@ -148,6 +161,7 @@ pub async fn create_sandbox(
         secret_env,
         browser: browser.clone(),
         docker,
+        coding_agent: coding_agent.clone(),
         mounts: mounts.clone(),
         files,
     };
@@ -169,6 +183,7 @@ pub async fn create_sandbox(
         timings: Timings::default(),
         secret_names,
         docker,
+        coding_agent: coding_agent_kind,
         mounts,
         ports: vec![],
         runtime_handle: None,
@@ -202,6 +217,7 @@ pub async fn create_sandbox(
     sb.timings.boot_ms = instance.boot_ms;
     sb.timings.image_cache_ms = instance.image_cache_ms;
     sb.timings.browser_ready_ms = instance.browser_ready_ms;
+    sb.timings.agent_ms = instance.agent_ms;
 
     // --- startup recipe (spec §14) --------------------------------------
     if let Some(recipe) = &startup {

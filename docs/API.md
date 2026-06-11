@@ -80,6 +80,7 @@ rejected with `400 bad_request`:
   "boot_path": "hot_pool",          // hot_pool | snapshot_restore | cold_boot
   "boot_ms": 42,
   "browser_ready_ms": 1280,          // present only for browser sandboxes
+  "coding_agent": "opencode",        // present only when the coding agent is opted in
   "auto_stop_seconds": 120,
   "timings": { "boot_ms": 42, "image_cache_ms": 0, "git_ms": 0,
                "install_ms": 0, "ready_ms": 0, "total_ms": 43 },
@@ -139,6 +140,7 @@ Added to `POST /v1/sandboxes` (all optional, default-off):
 ```jsonc
 {
   "docker": { "enabled": true },                 // dockerd inside the guest VM (heavy-build/custom image)
+  "coding_agent": { "enabled": true },           // install opencode CLI into the guest (opt-in; any image)
   "mounts": [ { "type": "s3", "bucket": "my-data", "mount_path": "/mnt/data",
                 "read_only": true, "prefix": "p/", "region": "us-east-1" } ],
   "files":  [ { "path": "config.json", "content": "{}", "encoding": "utf8" } ]

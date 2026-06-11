@@ -23,6 +23,14 @@ Heavier sandboxes require explicit options (spec §3.4)::
     )
     print(sandbox.urls["vnc"])
 
+Opt in to an in-sandbox coding agent (opencode), installed on demand::
+
+    sandbox = client.sandboxes.create(
+        coding_agent={"enabled": True},
+        startup={"secrets": ["ANTHROPIC_API_KEY"]},
+    )
+    sandbox.exec("opencode run 'add a test for utils.py'")
+
 Uses only the standard library (urllib), so it has zero dependencies.
 """
 

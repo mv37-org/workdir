@@ -131,6 +131,41 @@ active sandbox references them** (running sandboxes are never disrupted, spec
 
 ---
 
+## 5. Coding agent (opt-in)
+
+Install a lightweight in-sandbox coding-agent CLI ([opencode](https://opencode.ai))
+so an agent can read, write, and run code directly inside the sandbox.
+
+```jsonc
+{
+  "coding_agent": { "enabled": true },
+  "startup": { "secrets": ["ANTHROPIC_API_KEY"] }
+}
+```
+
+It is **opt-in by design**: the agent is **not** baked into the base rootfs, so
+the common case stays minimal (smaller images, smaller attack surface, fewer
+CVEs to track, faster hot-pool warming). When requested, the runtime installs it
+into the guest at provision time and records the install time separately as
+`timings.agent_ms`. The installed agent is reflected on the record as
+`"coding_agent": "opencode"`.
+
+| Field | Meaning | Default |
+|---|---|---|
+| `enabled` | Opt in to the agent | `false` |
+| `kind` | Which agent CLI; only `opencode` today | `opencode` |
+| `version` | Pin a specific version | installer's latest |
+
+The agent needs a provider key to be useful — supply one through the normal
+secret path (`startup.secrets`, e.g. `ANTHROPIC_API_KEY`), so it inherits the
+encrypted-at-rest + never-snapshotted guarantees. An unknown `kind` is rejected
+with a `400`. Works on any curated image (all ship `curl` + default egress).
+
+> The dev (`mock`) runtime records the intent but does **not** run the network
+> install; real installation happens only on the Firecracker runtime.
+
+---
+
 ## Create request — full option surface
 
 ```jsonc
@@ -142,6 +177,7 @@ active sandbox references them** (running sandboxes are never disrupted, spec
   "snapshot": false,
   "browser": { "enabled": true, "vnc": true, "cdp": true },
   "docker":  { "enabled": true },
+  "coding_agent": { "enabled": true, "kind": "opencode", "version": "latest" },
   "secrets-> via startup.secrets": [],
   "mounts":  [{ "type": "s3", "bucket": "...", "mount_path": "/mnt/...", "read_only": true }],
   "files":   [{ "path": "...", "content": "...", "encoding": "utf8|base64" }],
@@ -157,6 +193,9 @@ corresponding tooling baked in (added to the §10.3 image-build pipeline):
 
 - **docker-capable image**: `dockerd`, `containerd`, `runc`, overlayfs kernel, `iptables`.
 - **s3-mount support**: the `mount-s3` binary + FUSE.
+- **coding agent**: nothing required in the rootfs — it is installed on demand
+  over the network. To cut the per-create `agent_ms` install cost, pre-stage the
+  `opencode` binary in a layered image and the install step becomes a no-op.
 
 Secret management needs no image changes (host-side). Set
 `WORKDIR_SECRET_KEY` (or back up the generated `data_dir/secret.key`) so
