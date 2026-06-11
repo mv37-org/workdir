@@ -71,12 +71,42 @@ struct VmRecord {
     /// Jailer/Firecracker process id, for teardown.
     pid: Option<u32>,
     image_key: String,
+    /// Host tap device for this VM's NIC, removed on teardown.
+    tap: Option<String>,
     /// Env applied to every exec: startup env + injected secrets. Kept in host
     /// memory and passed per-exec so secrets never persist to a guest env file
     /// or land in a snapshot (review M3).
     resident_env: std::collections::BTreeMap<String, String>,
     /// True while secret values are resident; snapshots are refused.
     has_secrets: bool,
+}
+
+// --- sandbox networking (bridge + NAT) -------------------------------------
+/// Host bridge sandbox taps attach to (set up by the installer / workdir-net).
+const NET_BRIDGE: &str = "wdbr0";
+/// Gateway = the bridge's host IP; guests route default through it.
+const NET_GATEWAY: &str = "10.200.0.1";
+const NET_DNS: &str = "1.1.1.1";
+
+/// Guest IP for a tap index, from 10.200.0.0/16 (skipping .0 and the gateway .1).
+fn guest_ip(index: u32) -> String {
+    let n = index + 2;
+    format!("10.200.{}.{}", (n >> 8) & 0xff, n & 0xff)
+}
+
+/// Deterministic locally-administered MAC for a guest.
+fn guest_mac(index: u32) -> String {
+    let n = index + 2;
+    format!("06:00:0a:c8:{:02x}:{:02x}", (n >> 8) & 0xff, n & 0xff)
+}
+
+/// Run an `ip` command (needs CAP_NET_ADMIN on the daemon).
+async fn run_ip(args: &[&str]) -> Result<()> {
+    let status = tokio::process::Command::new("ip").args(args).status().await?;
+    if !status.success() {
+        bail!("ip {} failed", args.join(" "));
+    }
+    Ok(())
 }
 
 pub struct FirecrackerRuntime {
@@ -87,6 +117,7 @@ pub struct FirecrackerRuntime {
     workspaces: Workspaces,
     chroot_base: PathBuf,
     next_cid: AtomicU32,
+    next_tap: AtomicU32,
     vms: Mutex<HashMap<String, VmRecord>>,
 }
 
@@ -100,6 +131,7 @@ impl FirecrackerRuntime {
             workspaces: Workspaces::new(cfg.workspace_dir.clone()),
             chroot_base: cfg.workspace_dir.join("jail"),
             next_cid: AtomicU32::new(3), // CIDs 0-2 are reserved
+            next_tap: AtomicU32::new(0),
             vms: Mutex::new(HashMap::new()),
         }
     }
@@ -248,6 +280,19 @@ impl FirecrackerRuntime {
         // isolation boundary; the jailer (chroot + per-VM uid/gid + cgroups) is
         // defense-in-depth that layers on later — see deploy notes. Firecracker
         // refuses a pre-existing API socket, so clear it first.
+        // Per-VM tap on the host bridge, for NAT egress. Snapshot restores reuse
+        // the snapshot's NIC config, so only set up a tap on a fresh boot.
+        let tap_idx = self.next_tap.fetch_add(1, Ordering::SeqCst);
+        let tap = format!("wdtap{tap_idx}");
+        let guest_ip = guest_ip(tap_idx);
+        let guest_mac = guest_mac(tap_idx);
+        if snapshot.is_none() {
+            let _ = run_ip(&["link", "del", &tap]).await; // clear any stale device
+            run_ip(&["tuntap", "add", &tap, "mode", "tap"]).await.context("create tap")?;
+            run_ip(&["link", "set", &tap, "master", NET_BRIDGE]).await.context("attach tap to bridge")?;
+            run_ip(&["link", "set", &tap, "up"]).await.context("bring tap up")?;
+        }
+
         let _ = std::fs::remove_file(&api_sock);
         let log = std::fs::File::create(jail.join("firecracker.log")).context("fc log")?;
         let log2 = log.try_clone().context("fc log clone")?;
@@ -267,6 +312,7 @@ impl FirecrackerRuntime {
                 vsock_uds: vsock_uds.clone(),
                 pid,
                 image_key: spec.image_key.clone(),
+                tap: if snapshot.is_none() { Some(tap.clone()) } else { None },
                 resident_env: Default::default(),
                 has_secrets: false,
             },
@@ -307,15 +353,26 @@ impl FirecrackerRuntime {
                     "mem_size_mib": mem_mib,
                     "smt": false,
                 })).await?;
+                // Network params are passed on the kernel cmdline; the guest init
+                // configures eth0 from them (no in-guest DHCP needed).
+                let boot_args = format!(
+                    "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw \
+                     wd.ip={guest_ip} wd.gw={NET_GATEWAY} wd.dns={NET_DNS} init=/sbin/sandbox-init"
+                );
                 self.fc_api(&api_sock, "PUT", "/boot-source", &json!({
                     "kernel_image_path": self.kernel_image,
-                    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/sbin/sandbox-init",
+                    "boot_args": boot_args,
                 })).await?;
                 self.fc_api(&api_sock, "PUT", "/drives/rootfs", &json!({
                     "drive_id": "rootfs",
                     "path_on_host": overlay.to_str().unwrap(),
                     "is_root_device": true,
                     "is_read_only": false,
+                })).await?;
+                self.fc_api(&api_sock, "PUT", "/network-interfaces/eth0", &json!({
+                    "iface_id": "eth0",
+                    "host_dev_name": tap,
+                    "guest_mac": guest_mac,
                 })).await?;
                 self.fc_api(&api_sock, "PUT", "/actions", &json!({
                     "action_type": "InstanceStart",
@@ -428,7 +485,10 @@ impl FirecrackerRuntime {
         if let Some(pid) = pid {
             let _ = tokio::process::Command::new("kill").arg(pid.to_string()).status().await;
         }
-        self.vms.lock().unwrap().remove(handle);
+        let tap = self.vms.lock().unwrap().remove(handle).and_then(|r| r.tap);
+        if let Some(tap) = tap {
+            let _ = run_ip(&["link", "del", &tap]).await;
+        }
         let _ = std::fs::remove_dir_all(jail);
         self.workspaces.remove(handle).ok();
     }
@@ -595,8 +655,11 @@ impl Runtime for FirecrackerRuntime {
         let record = self.vms.lock().unwrap().remove(handle);
         if let Some(r) = record {
             if let Some(pid) = r.pid {
-                // SIGTERM the jailer; it tears down the VM and chroot.
-                let _ = tokio::process::Command::new("kill").arg(pid.to_string()).status().await;
+                // SIGKILL Firecracker; it tears the VM down with it.
+                let _ = tokio::process::Command::new("kill").arg("-9").arg(pid.to_string()).status().await;
+            }
+            if let Some(tap) = r.tap {
+                let _ = run_ip(&["link", "del", &tap]).await;
             }
             let _ = r.image_key; // (kept for future per-image teardown hooks)
         }

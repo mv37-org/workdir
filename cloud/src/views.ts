@@ -8,6 +8,11 @@ import type { ApiKeyRow } from "./db";
 // ─────────────────────────────────────────────────────────────────────────────
 
 const STYLES = `
+  @font-face {
+    font-family:"Geist Pixel";
+    src:url("https://cdn.jsdelivr.net/gh/vercel/geist-font@v1.7.2/fonts/GeistPixel/webfonts/GeistPixel-Square.woff2") format("woff2");
+    font-weight:400; font-style:normal; font-display:swap;
+  }
   :root {
     --bg:#0a0908; --bg1:#0e0d0b; --bg2:#0c0b09;
     --line:#211f19; --line2:#2e2b22;
@@ -16,6 +21,7 @@ const STYLES = `
     --ok:#8cd98c; --err:#ff6b5e;
     --sans:"Schibsted Grotesk",system-ui,-apple-system,sans-serif;
     --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+    --pixel:"Geist Pixel","IBM Plex Mono",ui-monospace,monospace;
   }
   * { box-sizing:border-box; }
   html { scrollbar-color:var(--line2) var(--bg); }
@@ -48,8 +54,12 @@ const STYLES = `
     animation:blink 1.4s steps(1) infinite;
   }
   .nav-links { display:flex; gap:22px; }
-  .nav-links a { font:400 12.5px var(--mono); color:var(--muted); }
-  .nav-links a:hover { color:var(--fg); text-decoration:none; }
+  .nav-links a {
+    font:400 12.5px var(--mono); color:var(--muted); padding-bottom:2px;
+    background:linear-gradient(var(--amber),var(--amber)) left bottom / 0 1px no-repeat;
+    transition:background-size .22s ease, color .15s;
+  }
+  .nav-links a:hover { color:var(--fg); text-decoration:none; background-size:100% 1px; }
   .nav-cta { margin-left:auto; display:flex; gap:10px; align-items:center; }
   .nav-cta form { margin:0; }
 
@@ -68,6 +78,9 @@ const STYLES = `
   .btn.danger:hover { border-color:var(--err); background:rgba(255,107,94,.08); color:var(--err); }
   .btn.sm { padding:8px 13px; font-size:12px; }
   .btn.block { width:100%; justify-content:center; }
+  .btn .ar { display:inline-block; transition:transform .18s ease; }
+  .btn:hover .ar { transform:translateX(3px); }
+  .btn.primary:hover { box-shadow:0 0 26px rgba(255,178,36,.22); }
 
   label {
     display:block; font:500 11px var(--mono); letter-spacing:.14em;
@@ -82,6 +95,8 @@ const STYLES = `
   input:focus { outline:none; border-color:var(--amber); box-shadow:0 0 0 3px rgba(255,178,36,.12); }
 
   /* ── shared chrome ───────────────────────────────────────────────────── */
+  .features > *, .code2 > *, .split > *, .stats > *, .tiles > *, .caps > * { min-width:0; }
+
   .corners { position:relative; }
   .corners::before, .corners::after {
     content:""; position:absolute; width:9px; height:9px;
@@ -98,7 +113,7 @@ const STYLES = `
   .kicker::after { content:""; height:1px; flex:1; background:var(--line); }
 
   section.block { padding:88px 0; border-top:1px solid var(--line); }
-  .h2 { font:700 clamp(26px,3.5vw,38px)/1.15 var(--sans); letter-spacing:-.02em; margin:0 0 14px; }
+  .h2 { font:400 clamp(21px,2.9vw,31px)/1.25 var(--pixel); letter-spacing:.01em; margin:0 0 14px; }
   .lead { color:var(--body); font-size:16px; max-width:580px; margin:0; }
 
   .copy {
@@ -124,6 +139,10 @@ const STYLES = `
     content:""; position:absolute; inset:0;
     background:radial-gradient(640px 380px at 74% 36%, rgba(255,122,26,.075), transparent 70%);
   }
+  .hero-bg::before {
+    content:""; position:absolute; inset:0; opacity:.5;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='0.05'/%3E%3C/feComponentTransfer%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
   .hero-grid {
     position:relative; display:grid; grid-template-columns:1.05fr .95fr;
     gap:56px; align-items:center;
@@ -132,8 +151,8 @@ const STYLES = `
   .hero-tag { font:400 12.5px var(--mono); color:var(--muted); margin-bottom:22px; }
   .hero-tag b { color:var(--amber); font-weight:500; }
   h1.display {
-    font:750 clamp(36px,4.8vw,56px)/1.04 var(--sans);
-    letter-spacing:-.03em; margin:0 0 20px;
+    font:400 clamp(32px,4.3vw,50px)/1.14 var(--pixel);
+    letter-spacing:.01em; margin:0 0 20px;
   }
   h1.display em { font-style:normal; color:var(--amber); }
   .hero p.sub { color:var(--body); font-size:16.5px; max-width:480px; margin:0 0 30px; }
@@ -203,14 +222,20 @@ const STYLES = `
     display:block; font:500 10.5px var(--mono); letter-spacing:.16em;
     text-transform:uppercase; color:var(--faint); margin-bottom:8px;
   }
-  .stat b { font:600 26px/1 var(--mono); letter-spacing:-.02em; color:var(--fg); }
-  .stat b small { font-size:14px; color:var(--muted); font-weight:400; }
+  .stat b { font:400 24px/1 var(--pixel); color:var(--fg); }
+  .stat b small { font-size:13px; color:var(--muted); font-weight:400; }
   .stat.hot b { color:var(--amber); }
 
   /* ── feature cards ───────────────────────────────────────────────────── */
   .features { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--line); border:1px solid var(--line); margin-top:44px; }
-  .fcard { background:var(--bg); padding:30px 28px 24px; transition:background .2s; }
+  .fcard { position:relative; background:var(--bg); padding:30px 28px 24px; transition:background .2s; }
   .fcard:hover { background:var(--bg1); }
+  .fcard::after {
+    content:"+"; position:absolute; top:10px; right:14px;
+    font:400 14px var(--mono); color:var(--amber);
+    opacity:0; transform:translateY(3px); transition:opacity .2s, transform .2s;
+  }
+  .fcard:hover::after { opacity:.9; transform:none; }
   .f-idx { font:600 11px var(--mono); letter-spacing:.18em; color:var(--amber); margin-bottom:42px; }
   .f-idx::after { content:" /"; color:var(--faint); }
   .fcard h3 { font:650 19px/1.3 var(--sans); letter-spacing:-.01em; margin:0 0 10px; }
@@ -243,10 +268,10 @@ const STYLES = `
   .cap {
     display:grid; grid-template-columns:150px 1fr 330px; gap:24px;
     padding:19px 24px; border-top:1px solid var(--line); align-items:baseline;
-    transition:background .15s;
+    transition:background .15s, box-shadow .2s;
   }
   .cap:first-child { border-top:0; }
-  .cap:hover { background:var(--bg1); }
+  .cap:hover { background:var(--bg1); box-shadow:inset 2px 0 0 var(--amber); }
   .cap-k { font:600 13px var(--mono); color:var(--amber); }
   .cap-d { margin:0; font-size:14px; color:var(--body); line-height:1.6; }
   .cap-c {
@@ -254,21 +279,59 @@ const STYLES = `
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   }
 
-  /* ── architecture ────────────────────────────────────────────────────── */
-  pre.arch {
-    margin:44px 0 0; padding:34px 24px; border:1px solid var(--line); background:var(--bg2);
-    font:400 12.5px/1.7 var(--mono); color:var(--faint); overflow-x:auto;
+  /* ── architecture flow ───────────────────────────────────────────────── */
+  .flow { margin-top:48px; display:flex; flex-direction:column; align-items:center; }
+  .flow-node {
+    width:min(560px,100%); border:1px solid var(--line2); background:var(--bg2);
+    transition:border-color .2s;
+  }
+  .flow-node:hover { border-color:#3f3a2d; }
+  .fn-head {
+    display:flex; justify-content:space-between; align-items:baseline; gap:12px;
+    padding:12px 16px; border-bottom:1px solid var(--line);
+  }
+  .fn-name { font:600 11.5px var(--mono); letter-spacing:.14em; text-transform:uppercase; color:var(--fg); }
+  .fn-meta { font:400 11px var(--mono); color:var(--faint); }
+  .fn-body { padding:11px 16px; font:400 12px/1.7 var(--mono); color:var(--muted); }
+  .fn-body i { color:var(--faint); font-style:normal; margin:0 4px; }
+  .flow-link {
+    position:relative; height:58px; width:100%;
+    display:flex; flex-direction:column; align-items:center;
+  }
+  .fl-line { position:relative; width:1px; height:100%; background:var(--line2); overflow:hidden; }
+  .fl-line i {
+    position:absolute; left:0; top:0; width:1px; height:14px;
+    background:linear-gradient(180deg, transparent, var(--amber));
+    animation:flowdrop 2.8s cubic-bezier(.55,.1,.45,.9) infinite; animation-delay:var(--fd,0s);
+  }
+  @keyframes flowdrop { 0% { top:-16px; } 100% { top:60px; } }
+  .fl-tag {
+    position:absolute; top:50%; left:calc(50% + 16px); transform:translateY(-50%);
+    font:400 11px var(--mono); color:var(--faint); white-space:nowrap;
+  }
+  .fl-tag b { color:var(--amber); font-weight:500; }
+  .flow-bin { position:relative; width:100%; display:flex; flex-direction:column; align-items:center; }
+  .flow-bin::before {
+    content:""; position:absolute; top:14px; bottom:14px; left:calc(50% - 322px);
+    width:9px; border:1px solid var(--line2); border-right:0;
+  }
+  .bin-tag {
+    position:absolute; top:50%; left:calc(50% - 348px);
+    transform:translate(-50%,-50%) rotate(180deg); writing-mode:vertical-rl;
+    font:500 10px var(--mono); letter-spacing:.24em; text-transform:uppercase; color:var(--amber);
+    white-space:nowrap;
+  }
+  .flow-caption {
+    margin-top:34px; font:400 11.5px var(--mono); letter-spacing:.08em; color:var(--faint);
     text-align:center;
   }
-  pre.arch b { color:var(--fg); font-weight:600; }
-  pre.arch i { color:var(--amber); font-style:normal; }
-  pre.arch u { color:var(--muted); text-decoration:none; }
+  .m-only { display:none; }
 
   /* ── deploy split ────────────────────────────────────────────────────── */
   .split { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:var(--line); border:1px solid var(--line); margin-top:44px; }
   .splitcell { background:var(--bg); padding:34px 30px; display:flex; flex-direction:column; gap:0; }
   .splitcell .tag { font:600 11px var(--mono); letter-spacing:.18em; text-transform:uppercase; color:var(--amber); margin-bottom:20px; }
-  .splitcell h3 { font:650 22px/1.2 var(--sans); letter-spacing:-.015em; margin:0 0 10px; }
+  .splitcell h3 { font:400 19px/1.3 var(--pixel); margin:0 0 10px; }
   .splitcell p { color:var(--body); font-size:14.5px; line-height:1.65; margin:0 0 24px; }
   .splitcell .grow { flex:1; }
   .install {
@@ -297,15 +360,15 @@ const STYLES = `
   .f-col a:hover { color:var(--amber); text-decoration:none; }
   .megamark { overflow:hidden; pointer-events:none; }
   .megamark div {
-    font:800 clamp(90px,16vw,200px)/.8 var(--sans); letter-spacing:-.05em;
-    text-align:center; color:transparent; -webkit-text-stroke:1px #1e1c16;
-    transform:translateY(14%); user-select:none;
+    font:400 clamp(70px,13.5vw,168px)/.92 var(--pixel); letter-spacing:.02em;
+    text-align:center; color:#15130e;
+    transform:translateY(16%); user-select:none;
   }
 
   /* ── auth ────────────────────────────────────────────────────────────── */
   .auth-wrap { max-width:400px; margin:9vh auto 90px; padding:0 24px; }
   .auth-card { border:1px solid var(--line2); background:var(--bg1); padding:34px 32px 30px; }
-  .auth-card h1 { font:700 24px var(--sans); letter-spacing:-.02em; margin:0 0 6px; }
+  .auth-card h1 { font:400 21px var(--pixel); margin:0 0 6px; }
   .auth-sub { font:400 12px var(--mono); color:var(--faint); margin:0 0 10px; }
   .auth-swap { text-align:center; font:400 12.5px var(--mono); color:var(--muted); margin-top:20px; }
 
@@ -316,7 +379,7 @@ const STYLES = `
   }
   .crumbs { font:400 12px var(--mono); color:var(--faint); }
   .crumbs b { color:var(--amber); font-weight:500; }
-  .dash-head h1 { font:700 30px var(--sans); letter-spacing:-.02em; margin:6px 0 0; }
+  .dash-head h1 { font:400 26px var(--pixel); margin:8px 0 0; }
   .chips { display:flex; gap:8px; flex-wrap:wrap; }
   .chip { font:400 11.5px var(--mono); color:var(--muted); border:1px solid var(--line); background:var(--bg1); padding:5px 10px; }
 
@@ -372,6 +435,28 @@ const STYLES = `
 
   .muted { color:var(--muted); } .small { font-size:13px; }
 
+  /* ── scroll reveal ───────────────────────────────────────────────────── */
+  .js .rev {
+    opacity:0; transform:translateY(16px);
+    transition:opacity .55s ease, transform .55s cubic-bezier(.2,.7,.2,1);
+    transition-delay:var(--rd,0s);
+  }
+  .js .rev.vis { opacity:1; transform:none; }
+  .features .rev:nth-child(2) { --rd:.07s; } .features .rev:nth-child(3) { --rd:.14s; }
+  .features .rev:nth-child(4) { --rd:.21s; }
+  .code2 .rev:nth-child(2), .split .rev:nth-child(2) { --rd:.1s; }
+  .caps .rev:nth-child(2) { --rd:.05s; } .caps .rev:nth-child(3) { --rd:.1s; }
+  .caps .rev:nth-child(4) { --rd:.15s; } .caps .rev:nth-child(5) { --rd:.2s; }
+  .caps .rev:nth-child(6) { --rd:.25s; }
+
+  .replay {
+    font:500 10.5px var(--mono); letter-spacing:.08em; color:var(--faint);
+    background:none; border:0; cursor:pointer; padding:2px 0 2px 12px;
+    transition:color .15s;
+  }
+  .replay:hover { color:var(--amber); }
+  .replay::before { content:"↺ "; }
+
   /* ── responsive ──────────────────────────────────────────────────────── */
   @media (max-width:920px) {
     .hero-grid { grid-template-columns:1fr; gap:40px; }
@@ -382,6 +467,9 @@ const STYLES = `
     .f-grid { grid-template-columns:1fr 1fr; }
     .tiles { grid-template-columns:1fr; }
     .nav-links { display:none; }
+    .flow-bin::before, .bin-tag { display:none; }
+    .m-only { display:inline; }
+    .fl-tag { left:calc(50% + 12px); }
   }
   @media (max-width:560px) {
     .stats { grid-template-columns:1fr; }
@@ -395,6 +483,8 @@ const STYLES = `
     .t-line, .t-out, .t-trace, .t-kv { opacity:1; }
     .t-cmd.c1 { width:14ch; } .t-cmd.c2 { width:53ch; } .t-cmd.c3 { width:24ch; }
     .t-bar { transform:none; }
+    .js .rev { opacity:1 !important; transform:none !important; }
+    .fl-line i { display:none; }
   }
 `;
 
@@ -411,6 +501,25 @@ const SCRIPT = `
       });
     });
   });
+
+  var replay = document.querySelector("[data-replay]");
+  if (replay) {
+    replay.addEventListener("click", function () {
+      var body = document.querySelector(".term-body");
+      if (body) body.replaceWith(body.cloneNode(true));
+    });
+  }
+
+  if ("IntersectionObserver" in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { e.target.classList.add("vis"); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.12, rootMargin: "0px 0px -8% 0px" });
+    document.querySelectorAll(".rev").forEach(function (el) { io.observe(el); });
+  } else {
+    document.querySelectorAll(".rev").forEach(function (el) { el.classList.add("vis"); });
+  }
 `;
 
 const FAVICON =
@@ -446,18 +555,6 @@ out = box.<span class="c-f">exec</span>(<span class="c-s">"python3 -c 'print(2+2
 
 box.<span class="c-f">delete</span>()                             <span class="c-c"># billed: 3 seconds</span>`;
 
-const ARCH_DIAGRAM = `              <u>sdk / rest api</u>
-                    │
-        ┌───────────┴───────────┐
-        │     <b>control plane</b>     │   <u>scheduler · billing · image registry · preview proxy</u>
-        └───────────┬───────────┘
-                    │  <i>Runtime trait</i>
-        ┌───────────┴───────────┐
-        │      <b>data plane</b>       │   <u>firecracker + jailer · vsock agent · NAT · hot pools</u>
-        └───────────────────────┘
-
-   <i>one binary</i> — start on a single server, add nodes one command at a time`;
-
 const QUICKSTART = `<span class="c-c"># point any HTTP client at the API with your key</span>
 <span class="c-k">export</span> WORKDIR_API_URL=<span class="c-s">https://api.workdir.dev</span>
 <span class="c-k">export</span> WORKDIR_KEY=<span class="c-s">&lt;your key above&gt;</span>
@@ -485,6 +582,9 @@ function layout(
         <meta property="og:title" content="${title}" />
         <meta property="og:description" content="${description}" />
         <title>${title}</title>
+        <script>
+          document.documentElement.classList.add("js");
+        </script>
         <link rel="icon" href="${FAVICON}" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -512,7 +612,7 @@ function layout(
                       <button class="btn sm" type="submit">log out</button>
                     </form>`
                 : html`<a class="btn sm" href="/login">log in</a>
-                    <a class="btn sm primary" href="/signup">get api key →</a>`}
+                    <a class="btn sm primary" href="/signup">get api key <span class="ar">→</span></a>`}
             </div>
           </div>
         </header>
@@ -522,8 +622,8 @@ function layout(
             <div class="f-grid">
               <div>
                 <p class="f-note">
-                  <b>workdir</b> — run untrusted code in fast, cheap Firecracker microVMs.
-                  built on bare metal. open source under AGPL-3.0.
+                  <b>workdir</b> — disposable computers for software that writes software.
+                  open source under AGPL-3.0.
                 </p>
               </div>
               <div class="f-col">
@@ -570,6 +670,7 @@ function heroTerminal() {
       <span class="t-dot"></span><span class="t-dot"></span><span class="t-dot"></span>
       <span class="term-title">workdir — zsh</span>
       <span class="term-host">api.workdir.dev</span>
+      <button class="replay" data-replay type="button" aria-label="replay the demo">replay</button>
     </div>
     <div class="term-body" aria-hidden="true">
       <div class="t-line" style="--d:.35s"><span class="t-p">$</span><span class="t-cmd c1" style="--d:.45s">workdir create</span></div>
@@ -598,15 +699,15 @@ export function landingPage(user?: { email: string }) {
         <div class="wrap">
           <div class="hero-grid">
             <div>
-              <div class="hero-tag"><b>$</b> firecracker microVMs · billed per second · open source</div>
-              <h1 class="display">Sandboxes that boot faster than your <em>TLS handshake</em>.</h1>
+              <div class="hero-tag"><b>$</b> sandboxes for ai agents · open source · billed by the second</div>
+              <h1 class="display">A computer for <em>every agent</em>.</h1>
               <p class="sub">
-                workdir runs untrusted code in Firecracker microVMs — real Linux machines created in
-                ~40&nbsp;ms, metered by the second, destroyed when you're done. One API for AI agents,
-                CI jobs, and app previews.
+                workdir hands your agent a real Linux machine — booted in ~40&nbsp;ms, sealed off from
+                everything you care about, gone when the job is done. You pay for the seconds in
+                between.
               </p>
               <div class="hero-ctas">
-                <a class="btn primary" href="/signup">get an api key →</a>
+                <a class="btn primary" href="/signup">get an api key <span class="ar">→</span></a>
                 <a class="btn" href="https://github.com/mv37-org/workdir">self-host it</a>
               </div>
               <div class="hero-foot">
@@ -631,43 +732,43 @@ export function landingPage(user?: { email: string }) {
           <div class="kicker"><b>//</b> why workdir</div>
           <h2 class="h2">A real computer, priced like a function call.</h2>
           <p class="lead">
-            Not a shared container, not a 30-second cold start. Each sandbox is its own microVM with
-            its own kernel — and it costs less than the API request that created it.
+            Not a shared container. Not a 30-second VM queue. Every sandbox is its own machine — and
+            it costs less than the API call that asked for it.
           </p>
           <div class="features">
-            <div class="fcard">
+            <div class="fcard rev">
               <div class="f-idx">01</div>
-              <h3>Boots in milliseconds</h3>
+              <h3>No waiting room</h3>
               <p>
-                Warm pools keep curated images hot. A default sandbox is ready in ~40&nbsp;ms — before
-                most APIs finish their TLS handshake.
+                Sandboxes come from warm pools, ready before your agent finishes its sentence. Forty
+                milliseconds, most days.
               </p>
               <div class="f-spec">boot_path: <em>hot_pool</em> · p50 &lt;50ms to first command</div>
             </div>
-            <div class="fcard">
+            <div class="fcard rev">
               <div class="f-idx">02</div>
-              <h3>Bare-metal cheap</h3>
+              <h3>Disposable on purpose</h3>
               <p>
-                Runs on plain dedicated servers and packs sandboxes by memory. Billed per second —
-                delete the box and the meter stops.
+                Spin up a fleet for one task and delete it mid-thought. The meter stops the second
+                you do.
               </p>
               <div class="f-spec">$0.009 / sandbox-hour · <em>1 vCPU / 2 GB</em> base shape</div>
             </div>
-            <div class="fcard">
+            <div class="fcard rev">
               <div class="f-idx">03</div>
-              <h3>Actually isolated</h3>
+              <h3>Run code you didn't write</h3>
               <p>
-                Every sandbox is a Firecracker microVM under the jailer — its own kernel, its own
-                devices. Run code you don't trust.
+                Each sandbox gets its own kernel behind a hardware boundary. Your agent's experiments
+                stay in the blast room.
               </p>
-              <div class="f-spec">kvm · jailer · vsock agent · per-VM NAT</div>
+              <div class="f-spec">firecracker microVM · jailer · <em>own kernel</em></div>
             </div>
-            <div class="fcard">
+            <div class="fcard rev">
               <div class="f-idx">04</div>
               <h3>Honest numbers</h3>
               <p>
-                Every create returns its boot path — hot_pool, snapshot_restore, or cold_boot — with a
-                full timing breakdown. Cold starts are never hidden in the marketing.
+                Every create reports how it booted and how long each step took. Cold starts don't
+                hide in our p50 — or yours.
               </p>
               <div class="f-spec">{ boot_path, timings_ms } <em>on every create</em></div>
             </div>
@@ -680,18 +781,18 @@ export function landingPage(user?: { email: string }) {
           <div class="kicker"><b>//</b> the api</div>
           <h2 class="h2">Three calls. Create, exec, delete.</h2>
           <p class="lead">
-            Typed SDKs for TypeScript and Python, or a small REST API you can drive with curl. Clone a
-            repo, run commands, expose a port — get a public preview URL back.
+            Typed SDKs for TypeScript and Python, or curl if that's more your thing. Clone a repo,
+            run commands, open a port — get back a URL you can share.
           </p>
           <div class="code2">
-            <div class="codebox">
+            <div class="codebox rev">
               <div class="codehead">
                 <span>agent.ts</span><span class="lang">typescript</span>
                 <button class="copy" data-copy="#code-ts" type="button">copy</button>
               </div>
               <pre class="code" id="code-ts">${raw(TS_CODE)}</pre>
             </div>
-            <div class="codebox">
+            <div class="codebox rev">
               <div class="codehead">
                 <span>ci.py</span><span class="lang">python</span>
                 <button class="copy" data-copy="#code-py" type="button">copy</button>
@@ -707,55 +808,54 @@ export function landingPage(user?: { email: string }) {
           <div class="kicker"><b>//</b> batteries included</div>
           <h2 class="h2">Everything an agent reaches for.</h2>
           <p class="lead">
-            All opt-in, all preserving the cheap default path — a bare <code>create()</code> stays a
-            bare <code>create()</code>.
+            Six flags on <code>create()</code>. None of them on the meter until you flip one.
           </p>
           <div class="caps corners">
-            <div class="cap">
+            <div class="cap rev">
               <code class="cap-k">secrets</code>
               <p class="cap-d">
-                Org-scoped secrets, AES-256-GCM at rest, injected per exec from host memory — never
-                written to disk, never captured in a snapshot.
+                Encrypted at rest, injected at runtime, never written to disk or snapshots. Your keys
+                outlive nothing.
               </p>
               <code class="cap-c">startup: { secrets: ["OPENAI_API_KEY"] }</code>
             </div>
-            <div class="cap">
+            <div class="cap rev">
               <code class="cap-k">docker</code>
               <p class="cap-d">
-                dockerd runs <i>inside</i> the microVM — build and run containers with full isolation.
-                The host socket is never exposed.
+                Containers inside the sandbox, isolated with everything else. The host never meets
+                your Dockerfile.
               </p>
               <code class="cap-c">docker: { enabled: true }</code>
             </div>
-            <div class="cap">
+            <div class="cap rev">
               <code class="cap-k">mounts.s3</code>
               <p class="cap-d">
-                Mount S3, R2, or MinIO buckets into the guest via mountpoint-s3, with credentials
-                injected from your encrypted secrets.
+                Mount a bucket like a folder — S3, R2, or MinIO — with credentials pulled from your
+                encrypted secrets.
               </p>
               <code class="cap-c">{ type: "s3", bucket: "data", mount_path: "/mnt/data" }</code>
             </div>
-            <div class="cap">
+            <div class="cap rev">
               <code class="cap-k">browser</code>
               <p class="cap-d">
-                Chromium + Playwright preinstalled, with noVNC to watch and CDP to drive. Built for
-                agent browsing and end-to-end tests.
+                Chromium with Playwright wired up, a VNC view to watch your agent browse, CDP if
+                you'd rather drive.
               </p>
               <code class="cap-c">image: "browser" → urls.vnc · urls.cdp</code>
             </div>
-            <div class="cap">
+            <div class="cap rev">
               <code class="cap-k">previews</code>
               <p class="cap-d">
-                Expose ports and get public HTTPS URLs through an authenticated proxy — live app
-                previews from inside the sandbox.
+                Open a port, get a public HTTPS URL. Demo the app your agent just built without
+                deploying it.
               </p>
               <code class="cap-c">ports: [3000] → 3000-sb_x.sandboxes.workdir.dev</code>
             </div>
-            <div class="cap">
+            <div class="cap rev">
               <code class="cap-k">files</code>
               <p class="cap-d">
-                Drop inline files into the workspace at boot; build throwaway images that
-                garbage-collect themselves.
+                Drop config and seed data in at boot; build throwaway images that clean up after
+                themselves.
               </p>
               <code class="cap-c">files: [{ path: "config.json", content: … }]</code>
             </div>
@@ -768,11 +868,35 @@ export function landingPage(user?: { email: string }) {
           <div class="kicker"><b>//</b> how it works</div>
           <h2 class="h2">One binary, two planes.</h2>
           <p class="lead">
-            The control plane schedules, meters, and proxies. The data plane boots Firecracker
-            microVMs behind a runtime trait — so the whole API also runs anywhere for development,
-            no KVM required.
+            A control plane that decides; a data plane that executes. Develop against the same API
+            on your laptop — isolation switches on in production, not in your code.
           </p>
-          <pre class="arch">${raw(ARCH_DIAGRAM)}</pre>
+          <div class="flow rev">
+            <div class="flow-node">
+              <div class="fn-head"><span class="fn-name">your agent</span><span class="fn-meta">sdk · rest</span></div>
+              <div class="fn-body">@workdir/sdk <i>·</i> pip install workdir <i>·</i> plain curl</div>
+            </div>
+            <div class="flow-link">
+              <span class="fl-line"><i></i></span>
+              <span class="fl-tag">https + api key</span>
+            </div>
+            <div class="flow-bin">
+              <span class="bin-tag">one binary</span>
+              <div class="flow-node">
+                <div class="fn-head"><span class="fn-name">control plane</span><span class="fn-meta">decides</span></div>
+                <div class="fn-body">scheduler <i>·</i> billing <i>·</i> image registry <i>·</i> preview proxy</div>
+              </div>
+              <div class="flow-link">
+                <span class="fl-line"><i style="--fd:1.4s"></i></span>
+                <span class="fl-tag"><b>Runtime</b> trait</span>
+              </div>
+              <div class="flow-node">
+                <div class="fn-head"><span class="fn-name">data plane</span><span class="fn-meta">executes</span></div>
+                <div class="fn-body">microVMs <i>·</i> jailer <i>·</i> vsock agent <i>·</i> hot pools</div>
+              </div>
+            </div>
+            <div class="flow-caption"><span class="m-only">one binary · </span>start on one server · add nodes one command at a time</div>
+          </div>
         </div>
       </section>
 
@@ -781,21 +905,21 @@ export function landingPage(user?: { email: string }) {
           <div class="kicker"><b>//</b> run it your way</div>
           <h2 class="h2">Managed cloud, or your own metal.</h2>
           <div class="split">
-            <div class="splitcell">
+            <div class="splitcell rev">
               <div class="tag">cloud</div>
               <h3>workdir.dev</h3>
               <p class="grow">
-                The fastest way in — no infra, no kernel images to build. Sign up, grab a key, create
-                your first sandbox in under a minute.
+                No infra, no images to build. Sign up, take a key, boot your first sandbox before
+                the coffee order's ready.
               </p>
-              <div><a class="btn primary" href="/signup">get an api key →</a></div>
+              <div><a class="btn primary" href="/signup">get an api key <span class="ar">→</span></a></div>
             </div>
-            <div class="splitcell">
+            <div class="splitcell rev">
               <div class="tag">self-host</div>
               <h3>Your own server</h3>
               <p class="grow">
-                AGPL-3.0, one install script, one KVM-capable box. The same binary that runs the
-                cloud — scheduler, billing, and preview proxy included.
+                One install script, one server, AGPL-3.0. The same binary that runs our cloud —
+                scheduler, billing, previews and all.
               </p>
               <div class="install">
                 <code id="code-install">curl -fsSL https://workdir.dev/install.sh | sudo bash</code>
@@ -809,10 +933,10 @@ export function landingPage(user?: { email: string }) {
       <section class="cta">
         <div class="wrap">
           <div class="kicker" style="justify-content:center"><b>//</b> get started</div>
-          <h2 class="h2">Give your agent a real computer.</h2>
-          <p>First sandbox in under a minute. No credit card to start.</p>
+          <h2 class="h2">First sandbox in under a minute.</h2>
+          <p>No credit card. No Kubernetes. No waitlist.</p>
           <div class="cta-row">
-            <a class="btn primary" href="/signup">get an api key →</a>
+            <a class="btn primary" href="/signup">get an api key <span class="ar">→</span></a>
             <a class="btn" href="https://github.com/mv37-org/workdir">star on github</a>
           </div>
         </div>
@@ -841,7 +965,7 @@ export function authPage(mode: "login" | "signup", error?: string) {
           <label for="password">password</label>
           <input id="password" name="password" type="password" placeholder="${isSignup ? "8+ characters" : "••••••••"}" required minlength="8" />
           <div style="margin-top:26px">
-            <button class="btn primary block" type="submit">${isSignup ? "create account →" : "log in →"}</button>
+            <button class="btn primary block" type="submit">${isSignup ? html`create account <span class="ar">→</span>` : html`log in <span class="ar">→</span>`}</button>
           </div>
         </form>
         <p class="auth-swap">
