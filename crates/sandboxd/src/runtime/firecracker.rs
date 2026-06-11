@@ -184,6 +184,9 @@ pub struct FirecrackerRuntime {
     /// Share one read-only base rootfs across VMs instead of a per-VM COW copy
     /// (Phase 3 density); the guest layers a tmpfs+overlayfs on top.
     shared_rootfs: bool,
+    /// Launch Firecracker with `--no-seccomp` (see config docs); needed for
+    /// snapshot/create under the jailer on some kernels (firecracker#1088).
+    no_seccomp: bool,
     next_cid: AtomicU32,
     next_tap: AtomicU32,
     vms: Mutex<HashMap<String, VmRecord>>,
@@ -204,6 +207,7 @@ impl FirecrackerRuntime {
             prewarm_mem_cache: cfg.prewarm_mem_cache,
             cpu_template: cfg.cpu_template.clone(),
             shared_rootfs: cfg.shared_rootfs,
+            no_seccomp: cfg.firecracker_no_seccomp,
             next_cid: AtomicU32::new(3), // CIDs 0-2 are reserved
             next_tap: AtomicU32::new(0),
             vms: Mutex::new(HashMap::new()),
@@ -372,6 +376,7 @@ impl FirecrackerRuntime {
                 .args(["--uid", &uid.to_string(), "--gid", &uid.to_string()])
                 .args(["--chroot-base-dir", self.chroot_base.to_str().unwrap()])
                 .args(["--", "--api-sock", "api.sock"])
+                .args(self.no_seccomp.then_some("--no-seccomp"))
                 .stdout(log)
                 .stderr(log2)
                 .spawn()
@@ -421,6 +426,7 @@ impl FirecrackerRuntime {
             let log2 = log.try_clone().context("fc log clone")?;
             let child = tokio::process::Command::new(&self.firecracker_bin)
                 .args(["--api-sock", api_sock.to_str().unwrap()])
+                .args(self.no_seccomp.then_some("--no-seccomp"))
                 .stdout(log)
                 .stderr(log2)
                 .spawn()
@@ -975,6 +981,7 @@ impl Runtime for FirecrackerRuntime {
         let log2 = log.try_clone().context("restore log clone")?;
         let child = tokio::process::Command::new(&self.firecracker_bin)
             .args(["--api-sock", api_sock.to_str().unwrap()])
+            .args(self.no_seccomp.then_some("--no-seccomp"))
             .stdout(log)
             .stderr(log2)
             .spawn()
@@ -1106,6 +1113,7 @@ impl Runtime for FirecrackerRuntime {
         let log2 = log.try_clone()?;
         let pid = tokio::process::Command::new(&self.firecracker_bin)
             .args(["--api-sock", child_sock.to_str().unwrap()])
+            .args(self.no_seccomp.then_some("--no-seccomp"))
             .stdout(log).stderr(log2)
             .spawn().context("spawn child firecracker")?
             .id();

@@ -98,6 +98,14 @@ pub struct RuntimeConfig {
     /// passthrough; snapshots are then only portable within identical hardware).
     #[serde(default)]
     pub cpu_template: String,
+    /// Run Firecracker with its built-in seccomp filter disabled (`--no-seccomp`).
+    /// Firecracker's default per-thread filter can SIGSYS-kill the process during
+    /// `snapshot/create` (a blocked syscall on the vmm thread; firecracker#1088),
+    /// which breaks perpetual standby. Under the jailer (chroot + uid drop + the
+    /// KVM boundary) this is a defensible defense-in-depth reduction; the proper
+    /// alternative is a custom seccompiler filter. Default false.
+    #[serde(default)]
+    pub firecracker_no_seccomp: bool,
 }
 
 fn default_restore_mem_backend() -> String {
@@ -184,6 +192,7 @@ impl Default for RuntimeConfig {
             prewarm_mem_cache: true,
             shared_rootfs: false,
             cpu_template: String::new(),
+            firecracker_no_seccomp: false,
         }
     }
 }
@@ -242,6 +251,9 @@ impl Config {
         }
         if let Ok(v) = std::env::var("WORKDIR_STANDBY") {
             cfg.standby.enabled = matches!(v.as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(v) = std::env::var("WORKDIR_FC_NO_SECCOMP") {
+            cfg.runtime.firecracker_no_seccomp = matches!(v.as_str(), "1" | "true" | "yes");
         }
         // Derive runtime storage paths from data_dir when not explicitly set, so
         // a single `data_dir` is enough to run anywhere (dev or production).
