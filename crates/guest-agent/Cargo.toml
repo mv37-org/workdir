@@ -1,0 +1,15 @@
+[package]
+name = "guest-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "In-VM guest agent: exec, files, ports, readiness over vsock (Linux)."
+
+[[bin]]
+name = "sandbox-guest-agent"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

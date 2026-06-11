@@ -1,0 +1,47 @@
+[package]
+name = "sandboxd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Low-cost Firecracker microVM sandbox provider: control plane + host agent."
+default-run = "sandboxd"
+
+[[bin]]
+name = "sandboxd"
+path = "src/main.rs"
+
+[lib]
+name = "sandboxd"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "net", "fs", "io-util", "sync", "time", "signal"] }
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+chrono = { version = "0.4", features = ["serde", "clock"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+anyhow = "1"
+thiserror = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
+sha2 = "0.10"
+hex = "0.4"
+async-trait = "0.1"
+aes-gcm = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

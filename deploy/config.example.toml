@@ -1,0 +1,49 @@
+# sandboxd configuration (see `sandboxd gen-config` for the generated form).
+#
+# Paths under [runtime] left empty are derived from [server].data_dir at load
+# time, so a single data_dir is enough to run anywhere.
+
+[server]
+bind = "0.0.0.0:8080"
+public_domain = "sandboxes.example.com"   # wildcard DNS: *.sandboxes.example.com
+public_https = true
+# public_port = 8080   # include in preview URLs when reached on a non-standard port (e.g. a LAN)
+data_dir = "/var/lib/sandboxd"
+
+[node]
+role = "all-in-one"          # "all-in-one" (control plane + data plane) or "worker"
+node_id = ""                  # generated + persisted on first boot if empty
+advertise_addr = ""           # internal address peers use; defaults to bind
+total_memory_gb = 0.0         # auto-detected when 0
+control_plane_url = ""        # workers: e.g. https://api.sandboxes.example.com
+join_token = ""               # workers: token from POST /v1/nodes/join-token
+
+[runtime]
+kind = "firecracker"          # "firecracker" (prod, Linux+/dev/kvm) or "mock" (dev)
+firecracker_bin = "/usr/local/bin/firecracker"
+jailer_bin = "/usr/local/bin/jailer"
+kernel_image = ""             # defaults to <data_dir>/kernel/vmlinux
+images_dir = ""               # defaults to <data_dir>/images
+workspace_dir = ""            # defaults to <data_dir>/workspaces
+
+[pricing]
+# Worked example for a ~EUR 44/month, 64 GB Hetzner EX44 node.
+default_unit_price_usd_hr = 0.009   # base shape (1 unit) target price/hr
+monthly_node_cost_usd = 48.0
+node_practical_units = 20
+
+[pricing.image_multipliers]
+base = 1.0
+"node-python" = 1.1
+browser = 2.5
+"heavy-build" = 2.0
+custom = 1.2
+
+[hotpool]
+enabled = true
+warm_interval_seconds = 5
+base_target = 2               # keep 2 base sandboxes ready (spec §25.1)
+
+[auth]
+bootstrap_admin_key = ""      # set for reproducible installs; else generated once
+bootstrap_org = "org_admin"

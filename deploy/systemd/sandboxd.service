@@ -1,0 +1,31 @@
+[Unit]
+Description=sandboxd — low-cost Firecracker microVM sandbox provider
+Documentation=https://github.com/your-org/lowcost-sandbox
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sandboxd
+Group=sandboxd
+# The host agent needs KVM, jailer privileges, and tap/netns management. It
+# runs as the sandboxd user but with the capabilities the jailer requires.
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_MKNOD CAP_DAC_OVERRIDE
+Environment=SANDBOXD_CONFIG=/etc/sandboxd/config.toml
+Environment=RUST_LOG=info,sandboxd=info
+ExecStart=/usr/local/bin/sandboxd serve --config /etc/sandboxd/config.toml
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=1048576
+# Hardening (the microVMs are the isolation boundary; protect the host too).
+NoNewPrivileges=false
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/sandboxd /etc/sandboxd
+StateDirectory=sandboxd
+# Allow access to KVM and tun for Firecracker + networking.
+DeviceAllow=/dev/kvm rw
+DeviceAllow=/dev/net/tun rw
+
+[Install]
+WantedBy=multi-user.target

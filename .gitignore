@@ -1,0 +1,79 @@
+# ---------------------------------------------------------------------------
+# Rust / Cargo
+# ---------------------------------------------------------------------------
+/target/
+**/target/
+**/*.rs.bk
+*.pdb
+# Cargo.lock IS committed (this is an application, not a library) — do not ignore it.
+
+# ---------------------------------------------------------------------------
+# sandboxd runtime state & SECRETS — never commit these
+# ---------------------------------------------------------------------------
+# SQLite database + WAL/SHM sidecars
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+sandboxd.db*
+
+# AES master key for secret encryption (CRITICAL — never commit)
+secret.key
+**/secret.key
+
+# Generated admin/API keys (e.g. from examples/serve_lan.sh) and any *.key
+admin-key.txt
+**/admin-key.txt
+*.key
+
+# Local runtime data dirs (when a relative data_dir is used)
+/data/
+/var/
+workspaces/
+jail/
+images/*.ext4
+kernel/
+
+# Local config that may hold bootstrap_admin_key / SANDBOXD_SECRET_KEY
+config.toml
+config.local.toml
+config.*.local.toml
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------------------
+# Logs / temp
+# ---------------------------------------------------------------------------
+*.log
+logs/
+tmp/
+*.tmp
+
+# ---------------------------------------------------------------------------
+# SDK build/cache artifacts
+# ---------------------------------------------------------------------------
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+# TypeScript / Node
+node_modules/
+sdk/typescript/dist/
+sdk/typescript/*.js
+sdk/typescript/*.js.map
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
