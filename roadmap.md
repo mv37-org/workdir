@@ -51,6 +51,36 @@ Work splits along two independent axes:
 
 Win Axis A first.
 
+## Production deployment status (2026-06-11)
+
+Phases 0–3 are merged to the branch and the binary is deployed to the live
+Hetzner node (Ubuntu 24.04, x86_64, firecracker + jailer), built on the node.
+
+**Measured on the real node** (`POST /v1/benchmarks/run`, base image):
+
+| boot path | ready p50 | create→echo p50 |
+|---|---|---|
+| `hot_pool` | ~1 ms | ~6 ms |
+| `cold_boot` | ~1.36 s | ~1.36 s |
+
+These beat the previously-published marketing numbers (38 ms hot / ~1.9 s cold).
+
+**Standby is deployed but gated OFF (`[standby] enabled = false`)** — so the
+reaper still *stops* idle sandboxes, exactly as before. It is gated because
+**snapshot/restore crashes Firecracker under the jailer**: `PUT /snapshot/create`
+returns an empty response (the process dies) even after passing chroot-relative
+paths. The benchmark harness was the canary that caught this on throwaway VMs,
+with zero impact to real sandboxes — which is exactly why standby ships gated.
+
+**Open blocker before standby/fork can be enabled in production:** the jailer
+snapshot path needs a focused pass — Firecracker is chrooted, so the mem-file
+path/permissions and the restore relaunch (re-enter the jailer chroot vs. the
+current unchrooted relaunch) must be made jailer-correct and validated via the
+harness. Related housekeeping: `delete()` leaks per-VM jail directories under the
+jailer (disk-only, reflink-cheap). All snapshot-based features (standby, fork,
+the `/snapshot` endpoint) share this jailer-path work; they work in the mock
+runtime and direct-launch Firecracker today.
+
 ## Phases
 
 ### Phase 0 — Measure (days) — ✅ landed
