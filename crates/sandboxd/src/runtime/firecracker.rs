@@ -1287,10 +1287,15 @@ impl Runtime for FirecrackerRuntime {
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
+            // mem.file and rootfs are the big artifacts — reflink-copy them so the
+            // child gets an instant CoW private copy (it diverges independently)
+            // instead of a multi-second full read+write of the 2 GB mem image.
             let _ = std::fs::copy(&parent_snap, new_chroot.join("snapshot.file"));
-            let _ = std::fs::copy(&parent_mem, new_chroot.join("mem.file"));
-            let _ = tokio::process::Command::new("cp").args(["--reflink=auto"])
-                .arg(parent_jail.join("rootfs.ext4")).arg(new_chroot.join("rootfs.ext4")).status().await;
+            let reflink = |from: PathBuf, to: PathBuf| async move {
+                let _ = tokio::process::Command::new("cp").args(["--reflink=auto"]).arg(from).arg(to).status().await;
+            };
+            reflink(parent_mem.clone(), new_chroot.join("mem.file")).await;
+            reflink(parent_jail.join("rootfs.ext4"), new_chroot.join("rootfs.ext4")).await;
             let owner = format!("{uid}:{uid}");
             let _ = tokio::process::Command::new("chown").arg("-R").arg(&owner).arg(&new_chroot).status().await;
             let new_api = new_chroot.join("api.sock");
@@ -1303,7 +1308,8 @@ impl Runtime for FirecrackerRuntime {
             (new_api, new_chroot.join("vsock.sock"), pid)
         } else {
             let _ = std::fs::copy(&parent_snap, child_jail.join("snapshot.file"));
-            let _ = std::fs::copy(&parent_mem, child_jail.join("mem.file"));
+            let _ = tokio::process::Command::new("cp").args(["--reflink=auto"])
+                .arg(&parent_mem).arg(child_jail.join("mem.file")).status().await;
             if parent_jail.join("overlay.ext4").exists() {
                 let _ = tokio::process::Command::new("cp").args(["--reflink=auto"])
                     .arg(parent_jail.join("overlay.ext4")).arg(child_jail.join("overlay.ext4")).status().await;
