@@ -38,12 +38,41 @@ struct VmState {
 
 pub struct MockRuntime {
     workspaces: Workspaces,
+    /// Persistent-volume backing stores (Phase 5). Each volume is a plain host
+    /// directory here; production backs it with a labelled ext4 image.
+    volumes_dir: std::path::PathBuf,
     state: Mutex<HashMap<String, VmState>>,
 }
 
 impl MockRuntime {
-    pub fn new(workspace_root: impl Into<std::path::PathBuf>) -> MockRuntime {
-        MockRuntime { workspaces: Workspaces::new(workspace_root), state: Mutex::new(HashMap::new()) }
+    pub fn new(
+        workspace_root: impl Into<std::path::PathBuf>,
+        volumes_dir: impl Into<std::path::PathBuf>,
+    ) -> MockRuntime {
+        MockRuntime {
+            workspaces: Workspaces::new(workspace_root),
+            volumes_dir: volumes_dir.into(),
+            state: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Simulate a block-volume attach: the volume's data lives in a host dir
+    /// (`<volumes_dir>/<id>.data`) and the "mount" is a symlink at the guest
+    /// mount path. Data genuinely persists across sandboxes, so the acceptance
+    /// flow (write in sandbox A, read in sandbox B) works like production.
+    /// Exclusive attachment is enforced upstream by the service layer.
+    fn attach_volume(&self, handle: &str, v: &crate::model::VolumeAttach) -> Result<()> {
+        let data = self.volumes_dir.join(format!("{}.data", v.volume_id));
+        if !data.exists() {
+            anyhow::bail!("volume {} has no backing store", v.volume_id);
+        }
+        let link = self.workspaces.resolve(handle, &v.mount_path)?;
+        if let Some(parent) = link.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&data, &link).context("simulate volume mount (symlink)")?;
+        Ok(())
     }
 
     fn dir(&self, handle: &str) -> std::path::PathBuf {

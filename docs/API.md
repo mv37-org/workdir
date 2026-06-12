@@ -150,6 +150,24 @@ Reference secrets in `startup.secrets: ["NAME", ...]`; values are injected into
 the sandbox env after assignment. A sandbox with resident secrets cannot be
 snapshotted (`409`).
 
+## Persistent volumes (Phase 5)
+
+Org-scoped block storage that **survives sandbox deletion**, so workspace state
+persists across sessions. A volume attaches to at most one running sandbox at a
+time.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/v1/volumes` | List the org's volumes. |
+| `POST` | `/v1/volumes` | `{name, size_gb}` → create. `size_gb` ∈ {1,5,10,20,50,100,250}. |
+| `GET` | `/v1/volumes/:id` | Get one (incl. `attached_to`). |
+| `DELETE` | `/v1/volumes/:id` | Delete + free storage; `409` while attached. |
+
+Attach at sandbox-create with `volumes: [{ "volume_id": "vol_…",
+"mount_path": "/mnt/data" }]`. The volume is mounted (ext4) at `mount_path` in
+the guest; attaching forces a cold boot. Deleting the sandbox detaches the
+volume (data intact) so it can be re-attached to a new one.
+
 ## Extended create options (features)
 
 Added to `POST /v1/sandboxes` (all optional, default-off):

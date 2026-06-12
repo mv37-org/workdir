@@ -246,11 +246,18 @@ this, capacity is a hardware question, not an architecture one.
   tmpfs+overlayfs root). *Known follow-up:* Chrome's CDP debug port (9222)
   doesn't bind under chrome-as-root, so the advertised `cdp` url is dead until
   chrome runs as a non-root user — VNC + screenshot are unaffected.
-- Add **persistent volumes** (block storage surviving delete) so workspace state
-  survives across sessions.
+- **Persistent volumes — done, validated on the node.** Org-scoped block storage
+  (`/v1/volumes` CRUD) backed by ext4 images under `runtime.volumes_dir`. Attach
+  at create with `volumes: [{volume_id, mount_path}]`; the backing image is
+  hardlinked into the jailer chroot (writes hit the real file), attached as an
+  extra drive, and mounted by ext4 LABEL in the guest. Attaching forces a cold
+  boot. A volume is exclusive to one running sandbox, refuses deletion while
+  attached (`409`), and **survives the sandbox's deletion** — verified end to
+  end: write into a volume from sandbox A, delete A, attach the same volume to
+  sandbox B, read the data back.
 - Declarative custom-image builds already exist.
 
-**Target:** persistent workspaces plus a working desktop.
+**Target:** persistent workspaces plus a working desktop. **Both delivered.**
 
 ### Phase 6 — Deferred (sequence last)
 

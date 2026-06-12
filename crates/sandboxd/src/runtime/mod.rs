@@ -191,4 +191,12 @@ pub trait Runtime: Send + Sync {
 
     /// Tear down the VM and delete its ephemeral disk.
     async fn delete(&self, handle: &str) -> Result<()>;
+
+    /// Allocate the backing store for a new persistent volume (Phase 5). The
+    /// Firecracker runtime formats a labelled ext4 image the guest mounts as a
+    /// block device; the dev runtime creates a plain host directory.
+    async fn create_volume(&self, volume_id: &str, size_gb: u32) -> Result<()>;
+
+    /// Remove a volume's backing store. Only called once the volume is detached.
+    async fn delete_volume(&self, volume_id: &str) -> Result<()>;
 }
