@@ -518,6 +518,7 @@ impl FirecrackerRuntime {
                 self.fc_api_to(&api_sock, "PUT", "/snapshot/load", &json!({
                     "snapshot_path": snap.join("snapshot.file").to_str().unwrap(),
                     "mem_backend": { "backend_path": snap.join("mem.file").to_str().unwrap(), "backend_type": "File" },
+                    "enable_diff_snapshots": true,
                     "resume_vm": true,
                 }), 300).await?;
             } else {
@@ -1122,6 +1123,7 @@ impl Runtime for FirecrackerRuntime {
             self.fc_api_to(&new_api, "PUT", "/snapshot/load", &json!({
                 "snapshot_path": "snapshot.file",
                 "mem_backend": { "backend_path": "mem.file", "backend_type": "File" },
+                "enable_diff_snapshots": true,
                 "resume_vm": true,
             }), 300).await?;
             if let Some(v) = self.vms.lock().unwrap().get_mut(handle) {
@@ -1185,6 +1187,7 @@ impl Runtime for FirecrackerRuntime {
         self.fc_api_to(&api_sock, "PUT", "/snapshot/load", &json!({
             "snapshot_path": snap_file.to_str().unwrap(),
             "mem_backend": { "backend_path": mem_file.to_str().unwrap(), "backend_type": backend_type },
+            "enable_diff_snapshots": true,
             "resume_vm": true,
         }), 300).await?;
 
@@ -1293,6 +1296,7 @@ impl Runtime for FirecrackerRuntime {
         self.fc_api_to(&child_sock, "PUT", "/snapshot/load", &json!({
             "snapshot_path": child_snap.to_str().unwrap(),
             "mem_backend": { "backend_path": child_mem.to_str().unwrap(), "backend_type": "File" },
+            "enable_diff_snapshots": true,
             "resume_vm": false,
         }), 300).await?;
         // Repoint the restored NIC at the child's own tap, then resume.
