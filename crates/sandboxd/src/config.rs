@@ -76,6 +76,9 @@ pub struct RuntimeConfig {
     pub images_dir: PathBuf,
     /// Per-sandbox writable workspace / COW disk root.
     pub workspace_dir: PathBuf,
+    /// Persistent-volume backing images (Phase 5); survive sandbox deletion.
+    #[serde(default)]
+    pub volumes_dir: PathBuf,
     /// Snapshot memory backend used on restore (roadmap Phase 2).
     /// `"file"` (default) maps the mem file directly; `"uffd"` serves pages
     /// lazily over a userfaultfd handler so resume returns before the working
@@ -188,6 +191,7 @@ impl Default for RuntimeConfig {
             kernel_image: String::new(),
             images_dir: PathBuf::new(),
             workspace_dir: PathBuf::new(),
+            volumes_dir: PathBuf::new(),
             restore_mem_backend: default_restore_mem_backend(),
             prewarm_mem_cache: true,
             shared_rootfs: false,
@@ -263,6 +267,9 @@ impl Config {
         }
         if cfg.runtime.images_dir.as_os_str().is_empty() {
             cfg.runtime.images_dir = data.join("images");
+        }
+        if cfg.runtime.volumes_dir.as_os_str().is_empty() {
+            cfg.runtime.volumes_dir = data.join("volumes");
         }
         if cfg.runtime.kernel_image.is_empty() {
             cfg.runtime.kernel_image = data.join("kernel/vmlinux").to_string_lossy().to_string();

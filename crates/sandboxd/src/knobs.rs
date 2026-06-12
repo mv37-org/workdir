@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 
 /// Allowed shared-vCPU values.
 pub const ALLOWED_CPU: [f64; 4] = [0.5, 1.0, 2.0, 4.0];
-/// Allowed memory values in MB (1, 2, 4, 8, 16 GB).
-pub const ALLOWED_MEMORY_MB: [u32; 5] = [1024, 2048, 4096, 8192, 16384];
+/// Allowed memory values in MB (0.5, 1, 2, 4, 8, 16 GB). The 512 MB shape exists
+/// for light, fast-standby sandboxes — its snapshot footprint is ~4× smaller
+/// than the base shape, so its first standby eviction is proportionally quicker.
+pub const ALLOWED_MEMORY_MB: [u32; 6] = [512, 1024, 2048, 4096, 8192, 16384];
 /// Allowed writable disk values in GB.
 pub const ALLOWED_DISK_GB: [u32; 4] = [8, 16, 32, 64];
 /// Auto-stop idle window bounds, in seconds.

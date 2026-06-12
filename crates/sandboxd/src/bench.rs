@@ -52,6 +52,7 @@ fn bench_spec(image_key: &str, resources: Resources) -> VmSpec {
         docker: false,
         coding_agent: None,
         mounts: Vec::new(),
+        volumes: Vec::new(),
         files: Vec::new(),
     }
 }

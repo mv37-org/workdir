@@ -88,6 +88,7 @@ pub async fn build_state(cfg: Config) -> Result<crate::state::AppState> {
     std::fs::create_dir_all(&cfg.server.data_dir).ok();
     std::fs::create_dir_all(&cfg.runtime.workspace_dir).ok();
     std::fs::create_dir_all(&cfg.runtime.images_dir).ok();
+    std::fs::create_dir_all(&cfg.runtime.volumes_dir).ok();
     let store = Store::open(&cfg.db_path()).context("open store")?;
 
     // Bootstrap the admin org + key; print the key once if freshly generated.
@@ -123,7 +124,7 @@ pub async fn build_state(cfg: Config) -> Result<crate::state::AppState> {
                 "INSECURE mock runtime enabled — user code runs on the host with NO isolation. \
                  Development use only."
             );
-            Arc::new(MockRuntime::new(cfg.runtime.workspace_dir.clone()))
+            Arc::new(MockRuntime::new(cfg.runtime.workspace_dir.clone(), cfg.runtime.volumes_dir.clone()))
         }
         other => anyhow::bail!("unknown runtime kind '{other}' (use 'mock' or 'firecracker')"),
     };

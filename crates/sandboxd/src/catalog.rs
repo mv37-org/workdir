@@ -64,13 +64,24 @@ impl ImageClass {
     /// Minimum resources the image is allowed to run with (spec §10.1, §12.1).
     pub fn minimum_resources(&self) -> Resources {
         match self {
-            ImageClass::Base => Resources { cpu: 1.0, memory_mb: 2048, disk_gb: 8 },
+            // Base can run as small as 512 MB for light, fast-standby workloads
+            // (the default cheap path is still 2 GB / 1.0 unit).
+            ImageClass::Base => Resources { cpu: 0.5, memory_mb: 512, disk_gb: 8 },
             ImageClass::NodePython => Resources { cpu: 1.0, memory_mb: 2048, disk_gb: 16 },
             ImageClass::Browser => Resources { cpu: 2.0, memory_mb: 4096, disk_gb: 16 },
             ImageClass::HeavyBuild => Resources { cpu: 2.0, memory_mb: 8192, disk_gb: 32 },
             // Custom images carry a resources_hint; we apply base minimums.
             ImageClass::Custom(_) => Resources { cpu: 1.0, memory_mb: 2048, disk_gb: 8 },
         }
+    }
+
+    /// Whether this image's guest `sandbox-init` can pivot into a tmpfs+overlayfs
+    /// root, so the host may share ONE read-only base across VMs (Phase 3
+    /// density). Only images with an overlay-aware init qualify; others keep a
+    /// per-VM writable COW copy. node-python's init is not overlay-aware yet, and
+    /// custom images carry arbitrary inits, so both stay unshared.
+    pub fn supports_shared_rootfs(&self) -> bool {
+        matches!(self, ImageClass::Base | ImageClass::Browser)
     }
 
     pub fn hot_pool_priority(&self) -> HotPoolPriority {

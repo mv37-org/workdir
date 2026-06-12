@@ -11,6 +11,7 @@ pub mod pty;
 pub mod sandboxes;
 pub mod secrets;
 pub mod usage;
+pub mod volumes;
 
 use crate::auth::{authenticate, AuthContext, AuthOutcome};
 use crate::error::ApiError;
@@ -33,6 +34,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sandboxes/:id/files", get(sandboxes::read_file).put(sandboxes::write_file))
         .route("/sandboxes/:id/ports/:port/expose", post(sandboxes::expose_port))
         .route("/sandboxes/:id/browser", post(sandboxes::browser_get).get(sandboxes::browser_get))
+        .route("/sandboxes/:id/browser/screenshot", get(sandboxes::browser_screenshot))
         .route("/sandboxes/:id/snapshot", post(sandboxes::snapshot))
         .route("/sandboxes/:id/fork", post(sandboxes::fork))
         .route("/sandboxes/:id/pause", post(sandboxes::pause))
@@ -44,6 +46,8 @@ pub fn router(state: AppState) -> Router {
         .route("/nodes/:id/drain", post(nodes::drain))
         .route("/secrets", get(secrets::list))
         .route("/secrets/:name", put(secrets::put).delete(secrets::delete))
+        .route("/volumes", get(volumes::list).post(volumes::create))
+        .route("/volumes/:id", get(volumes::get).delete(volumes::delete))
         .route("/usage", get(usage::usage))
         .route("/admin/overview", get(usage::admin_overview))
         .route("/admin/metrics", get(admin::metrics))

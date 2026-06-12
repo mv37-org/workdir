@@ -245,6 +245,47 @@ pub struct EphemeralFile {
 }
 
 // ---------------------------------------------------------------------------
+// Persistent volumes (Phase 5): org-scoped block storage that outlives any one
+// sandbox. A volume is a backing ext4 image on the host; it can be attached to
+// at most one running sandbox at a time and survives that sandbox's deletion.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Volume {
+    pub id: String,
+    pub org_id: String,
+    pub name: String,
+    pub size_gb: u32,
+    /// The sandbox this volume is currently attached to, if any (exclusive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attached_to: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// `POST /v1/volumes` body.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateVolumeRequest {
+    pub name: String,
+    pub size_gb: u32,
+}
+
+/// One volume attachment requested at sandbox-create time.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VolumeAttachRequest {
+    pub volume_id: String,
+    /// Absolute guest path to mount the volume at, e.g. "/mnt/data".
+    pub mount_path: String,
+}
+
+/// A resolved volume attachment carried on the sandbox + runtime spec.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeAttach {
+    pub volume_id: String,
+    pub mount_path: String,
+}
+
+// ---------------------------------------------------------------------------
 // Create request (spec §3.3, §3.4, §19)
 // ---------------------------------------------------------------------------
 
@@ -279,6 +320,9 @@ pub struct CreateSandboxRequest {
     /// Inline ephemeral files written into the workspace at boot.
     #[serde(default)]
     pub files: Option<Vec<EphemeralFile>>,
+    /// Persistent volumes to attach (block storage surviving delete).
+    #[serde(default)]
+    pub volumes: Option<Vec<VolumeAttachRequest>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +358,9 @@ pub struct Sandbox {
     /// Bucket mounts attached to the guest (no credentials).
     #[serde(default)]
     pub mounts: Vec<MountSpec>,
+    /// Persistent volumes attached to the guest (survive this sandbox's delete).
+    #[serde(default)]
+    pub volumes: Vec<VolumeAttach>,
     /// Preview ports exposed via the wildcard proxy.
     #[serde(default)]
     pub ports: Vec<u16>,

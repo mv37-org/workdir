@@ -40,6 +40,9 @@ pub struct VmSpec {
     pub coding_agent: Option<CodingAgentConfig>,
     /// Bucket mounts to set up after boot.
     pub mounts: Vec<MountSpec>,
+    /// Persistent volumes to attach as block devices and mount in the guest.
+    #[serde(default)]
+    pub volumes: Vec<crate::model::VolumeAttach>,
     /// Inline files to write into the workspace before startup commands run.
     pub files: Vec<(String, Vec<u8>)>,
 }
@@ -188,4 +191,12 @@ pub trait Runtime: Send + Sync {
 
     /// Tear down the VM and delete its ephemeral disk.
     async fn delete(&self, handle: &str) -> Result<()>;
+
+    /// Allocate the backing store for a new persistent volume (Phase 5). The
+    /// Firecracker runtime formats a labelled ext4 image the guest mounts as a
+    /// block device; the dev runtime creates a plain host directory.
+    async fn create_volume(&self, volume_id: &str, size_gb: u32) -> Result<()>;
+
+    /// Remove a volume's backing store. Only called once the volume is detached.
+    async fn delete_volume(&self, volume_id: &str) -> Result<()>;
 }

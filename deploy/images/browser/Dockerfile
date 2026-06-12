@@ -8,7 +8,7 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bash coreutils curl wget ca-certificates git socat iproute2 iputils-ping \
       python3 python3-pip python3-venv nodejs npm \
-      xvfb fluxbox x11vnc novnc websockify x11-utils \
+      xvfb fluxbox x11vnc novnc websockify x11-utils imagemagick \
       fonts-liberation \
     && wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb \
     && apt-get install -y --no-install-recommends /tmp/chrome.deb && rm /tmp/chrome.deb \

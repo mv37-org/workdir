@@ -4,6 +4,33 @@
 # host's vsock connections (port 5005) to the guest agent via socat.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc 2>/dev/null
+
+# Phase 3 density: when the host attaches ONE shared read-only base rootfs to
+# many VMs (wd.overlay=tmpfs, root mounted `ro`), there is a single copy in the
+# host page cache shared across every sandbox — but the guest needs somewhere to
+# write. Layer a per-VM tmpfs over the read-only base with overlayfs and
+# pivot_root into the writable merged view. The guard skips this on the
+# post-pivot re-exec (root is already overlay) and on normal rw-root boots.
+if grep -qw wd.overlay=tmpfs /proc/cmdline 2>/dev/null \
+   && ! grep -qE '^[^ ]+ / overlay ' /proc/mounts 2>/dev/null; then
+  mount -t tmpfs tmpfs /mnt 2>/dev/null
+  mkdir -p /mnt/upper /mnt/work /mnt/root
+  if mount -t overlay overlay \
+       -o lowerdir=/,upperdir=/mnt/upper,workdir=/mnt/work /mnt/root 2>/dev/null; then
+    mkdir -p /mnt/root/oldroot
+    cd /mnt/root
+    if pivot_root . oldroot 2>/dev/null; then
+      # `/` is now the writable overlay; the shared ro base + the upper/work
+      # tmpfs live under /oldroot, kept alive by the overlay's open references.
+      cd /
+      mount -t proc proc /proc 2>/dev/null
+      exec /sbin/sandbox-init
+    fi
+    # pivot_root failed — fall back to running on the ro base (degraded).
+    cd /
+  fi
+fi
+
 mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null

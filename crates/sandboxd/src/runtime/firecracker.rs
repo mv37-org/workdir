@@ -100,6 +100,27 @@ struct VmRecord {
     /// standby can take a fast Diff snapshot (only dirty pages) onto it.
     #[serde(default)]
     snapshotted: bool,
+    /// Persistent volumes attached at boot (Phase 5). Restores must re-stage the
+    /// backing files into the fresh chroot — the snapshot's drives reference them
+    /// by chroot-relative name.
+    #[serde(default)]
+    volumes: Vec<VolumeStage>,
+}
+
+/// One attached persistent volume as the runtime staged it.
+#[derive(Serialize, Deserialize, Clone)]
+struct VolumeStage {
+    /// Backing file name as the drive references it (chroot-relative under the
+    /// jailer), e.g. `vol_ab12cd.ext4`.
+    file: String,
+    /// The real backing image under `volumes_dir`. Hardlinked into the chroot so
+    /// guest writes land on the one persistent inode.
+    host_path: PathBuf,
+    /// Guest mount point.
+    mount_path: String,
+    /// ext4 label (set at mkfs) so the guest can mount by label, with the
+    /// virtio device path as fallback.
+    label: String,
 }
 
 // --- sandbox networking (bridge + NAT) -------------------------------------
@@ -176,6 +197,8 @@ pub struct FirecrackerRuntime {
     jailer_bin: String,
     kernel_image: String,
     images_dir: PathBuf,
+    /// Persistent-volume backing images (Phase 5).
+    volumes_dir: PathBuf,
     workspaces: Workspaces,
     chroot_base: PathBuf,
     use_jailer: bool,
@@ -207,6 +230,7 @@ impl FirecrackerRuntime {
             jailer_bin: cfg.jailer_bin.clone(),
             kernel_image: cfg.kernel_image.clone(),
             images_dir: cfg.images_dir.clone(),
+            volumes_dir: cfg.volumes_dir.clone(),
             workspaces: Workspaces::new(cfg.workspace_dir.clone()),
             chroot_base: cfg.workspace_dir.join("jail"),
             use_jailer: cfg.use_jailer,
@@ -221,6 +245,18 @@ impl FirecrackerRuntime {
             next_restore: AtomicU32::new(0),
             vms: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Whether THIS VM should share one read-only base + guest overlay (Phase 3
+    /// density). Gated per image: only images whose `sandbox-init` can pivot into
+    /// a tmpfs+overlayfs root qualify (base, browser). node-python/custom keep a
+    /// per-VM writable COW copy, so enabling `shared_rootfs` globally never gives
+    /// them a read-only root they can't write to.
+    fn shared_for(&self, spec: &VmSpec) -> bool {
+        self.shared_rootfs
+            && crate::catalog::classify(&spec.image_key)
+                .map(|c| c.supports_shared_rootfs())
+                .unwrap_or(false)
     }
 
     /// Read-only curated/custom rootfs artifact path for an image key/ref.
@@ -372,6 +408,31 @@ impl FirecrackerRuntime {
         self.workspaces.create(&handle)?;
         let rootfs = self.rootfs_path(spec);
 
+        // Persistent volumes (Phase 5): resolve each attach to its backing image
+        // up front so a missing volume fails before any resources are allocated.
+        // Drives are configured pre-boot, so volumes only ride cold boots — the
+        // service layer keeps volume sandboxes off the warm/snapshot paths.
+        let vol_stages = spec
+            .volumes
+            .iter()
+            .map(|v| {
+                let file = format!("{}.ext4", v.volume_id);
+                let host_path = self.volumes_dir.join(&file);
+                if !host_path.exists() {
+                    bail!("volume {} has no backing image at {host_path:?}", v.volume_id);
+                }
+                Ok(VolumeStage {
+                    file,
+                    host_path,
+                    mount_path: v.mount_path.clone(),
+                    label: ids::volume_label(&v.volume_id),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if !vol_stages.is_empty() && snapshot.is_some() {
+            bail!("volumes cannot attach to a snapshot boot (drives are configured pre-boot)");
+        }
+
         // Per-VM tap on the host bridge, for NAT egress (common to both launch
         // modes). Snapshot restores reuse the snapshot's NIC, so tap only on a
         // fresh boot.
@@ -421,10 +482,39 @@ impl FirecrackerRuntime {
             let rdst = chroot_root.join("rootfs.ext4");
             tokio::process::Command::new("cp").arg(&self.kernel_image).arg(&kdst).status().await
                 .context("stage kernel into chroot")?;
-            tokio::process::Command::new("cp").args(["--reflink=auto"]).arg(&rootfs).arg(&rdst).status().await
-                .context("stage rootfs into chroot")?;
             let owner = format!("{uid}:{uid}");
-            let _ = tokio::process::Command::new("chown").arg(&owner).arg(&kdst).arg(&rdst).status().await;
+            let _ = tokio::process::Command::new("chown").arg(&owner).arg(&kdst).status().await;
+            // Phase 3 density: with `shared_rootfs`, HARDLINK the read-only base
+            // into the chroot — same inode → one copy in the host page cache
+            // shared by every VM, instant, zero extra disk. No chown: that would
+            // mutate the shared inode's owner; the base is world-readable so the
+            // jailed uid still opens it read-only. The guest layers tmpfs+overlayfs
+            // for writes (wd.overlay=tmpfs). Without sharing, give each VM its own
+            // reflinked COW copy (chowned to the jailed uid) as before.
+            if self.shared_for(spec) && std::fs::hard_link(&rootfs, &rdst).is_ok() {
+                // shared inode staged (read-only, world-readable)
+            } else {
+                tokio::process::Command::new("cp").args(["--reflink=auto"]).arg(&rootfs).arg(&rdst).status().await
+                    .context("stage rootfs into chroot")?;
+                let _ = tokio::process::Command::new("chown").arg(&owner).arg(&rdst).status().await;
+            }
+            // Persistent volumes: HARDLINK the backing image into the chroot —
+            // same inode, so guest writes persist under volumes_dir after this VM
+            // is gone. A copy here would silently fork the data, so a failed link
+            // (volumes_dir on a different filesystem) fails the boot instead.
+            // chown is required (and safe — attachment is exclusive) so the
+            // jailed uid can open it read-write.
+            for v in &vol_stages {
+                let dst = chroot_root.join(&v.file);
+                let _ = std::fs::remove_file(&dst);
+                std::fs::hard_link(&v.host_path, &dst).with_context(|| {
+                    format!(
+                        "hardlink volume {} into chroot (volumes_dir must share a filesystem with the jail)",
+                        v.file
+                    )
+                })?;
+                let _ = tokio::process::Command::new("chown").arg(&owner).arg(&dst).status().await;
+            }
             (
                 chroot_root.join("api.sock"),
                 chroot_root.join("vsock.sock"),
@@ -442,7 +532,7 @@ impl FirecrackerRuntime {
             // across all sandboxes; DAX-mappable) and the guest layers a
             // tmpfs+overlayfs for writes — no per-VM rootfs copy at all.
             // Otherwise, give the VM its own reflinked COW overlay.
-            let root_disk = if self.shared_rootfs {
+            let root_disk = if self.shared_for(spec) {
                 rootfs.to_string_lossy().into_owned()
             } else {
                 let overlay = jail.join("overlay.ext4");
@@ -486,6 +576,7 @@ impl FirecrackerRuntime {
                 has_secrets: false,
                 standby: false,
                 snapshotted: false,
+                volumes: vol_stages.clone(),
             },
         );
         self.persist_record(&handle);
@@ -543,7 +634,7 @@ impl FirecrackerRuntime {
                 // configures eth0 from them (no in-guest DHCP needed). With a
                 // shared read-only base, mount it `ro` and signal the guest init
                 // to layer a tmpfs+overlayfs so writes land in RAM (Phase 3).
-                let (root_mode, overlay_arg) = if self.shared_rootfs {
+                let (root_mode, overlay_arg) = if self.shared_for(spec) {
                     ("ro", " wd.overlay=tmpfs")
                 } else {
                     ("rw", "")
@@ -560,8 +651,24 @@ impl FirecrackerRuntime {
                     "drive_id": "rootfs",
                     "path_on_host": rootfs_fc,
                     "is_root_device": true,
-                    "is_read_only": self.shared_rootfs,
+                    "is_read_only": self.shared_for(spec),
                 })).await?;
+                // Persistent volumes as extra virtio block drives. Order matters:
+                // the rootfs is vda, so volume i appears at /dev/vd{b+i} — the
+                // device-path fallback `apply_features` mounts by.
+                for (i, v) in vol_stages.iter().enumerate() {
+                    let path = if self.use_jailer {
+                        v.file.clone()
+                    } else {
+                        v.host_path.to_string_lossy().into_owned()
+                    };
+                    self.fc_api(&api_sock, "PUT", &format!("/drives/vol{i}"), &json!({
+                        "drive_id": format!("vol{i}"),
+                        "path_on_host": path,
+                        "is_root_device": false,
+                        "is_read_only": false,
+                    })).await?;
+                }
                 self.fc_api(&api_sock, "PUT", "/network-interfaces/eth0", &json!({
                     "iface_id": "eth0",
                     "host_dev_name": tap,
@@ -613,6 +720,32 @@ impl FirecrackerRuntime {
                 rec.resident_env = spec.env.clone();
                 rec.resident_env.extend(spec.secret_env.clone());
                 rec.has_secrets = !spec.secret_env.is_empty();
+            }
+        }
+
+        // Mount persistent volumes first — inline files and startup commands may
+        // target paths inside them. Prefer mount-by-label (stable across device
+        // renumbering); fall back to the positional virtio path (/dev/vd{b+i},
+        // rootfs is vda). A failed mount fails the boot: continuing silently
+        // would let "persistent" writes land in the ephemeral root.
+        for (i, v) in spec.volumes.iter().enumerate() {
+            let label = ids::volume_label(&v.volume_id);
+            let dev = format!("/dev/vd{}", (b'b' + i as u8) as char);
+            let cmd = format!(
+                "mkdir -p {mp} && (mount -L {label} {mp} 2>/dev/null || mount {dev} {mp})",
+                mp = shell_quote(&v.mount_path),
+            );
+            let res = self
+                .agent_call(handle, &json!({"op": "exec", "cmd": cmd, "background": false}))
+                .await?;
+            let exit = res.get("exit_code").and_then(|c| c.as_i64()).unwrap_or(-1);
+            if exit != 0 {
+                bail!(
+                    "mount volume {} at {} failed (exit {exit}): {}",
+                    v.volume_id,
+                    v.mount_path,
+                    res.get("stderr").and_then(|s| s.as_str()).unwrap_or("")
+                );
             }
         }
 
@@ -1041,7 +1174,7 @@ impl Runtime for FirecrackerRuntime {
         // snapshot, and wait for the guest agent. After a control-plane restart
         // the in-memory record is gone, so rehydrate it from disk first.
         self.ensure_record_loaded(handle);
-        let (api_sock, jail, vsock_uds, tap, tap_idx) = {
+        let (api_sock, jail, vsock_uds, tap, tap_idx, volumes) = {
             let vms = self.vms.lock().unwrap();
             let v = vms.get(handle).ok_or_else(|| anyhow!("unknown vm {handle} (no persisted record)"))?;
             (
@@ -1050,6 +1183,7 @@ impl Runtime for FirecrackerRuntime {
                 v.vsock_uds.clone(),
                 v.tap.clone(),
                 v.tap_idx,
+                v.volumes.clone(),
             )
         };
         let start = Instant::now();
@@ -1106,6 +1240,15 @@ impl Runtime for FirecrackerRuntime {
             stage("snapshot.file")?;
             stage("mem.file")?;
             stage("rootfs.ext4")?;
+            // Persistent volumes: the snapshot's drives reference their backing
+            // files by chroot-relative name; hardlink each from its real image
+            // (same inode — writes keep landing on the persistent store).
+            for v in &volumes {
+                let dst = new_chroot.join(&v.file);
+                let _ = std::fs::remove_file(&dst);
+                std::fs::hard_link(&v.host_path, &dst)
+                    .with_context(|| format!("re-stage volume {} into restore chroot", v.file))?;
+            }
             let new_api = new_chroot.join("api.sock");
             for _ in 0..400 {
                 if new_api.exists() {
@@ -1251,7 +1394,7 @@ impl Runtime for FirecrackerRuntime {
         let (parent_snap, parent_mem) = self.write_snapshot(&parent_sock, &parent_jail, false).await?;
         self.fc_api(&parent_sock, "PATCH", "/vm", &json!({"state": "Resumed"})).await?;
 
-        // Stage the child VM.
+        // Stage the child VM (its own id, tap, CID, and a private disk copy).
         let child = format!("vm_{}", child_spec.sandbox_id);
         let child_jail = self.chroot_base.join(&child);
         std::fs::create_dir_all(&child_jail).context("create child jail")?;
@@ -1262,58 +1405,104 @@ impl Runtime for FirecrackerRuntime {
         let cid = self.next_cid.fetch_add(1, Ordering::SeqCst);
         setup_tap(&tap).await.context("fork: child tap")?;
 
-        // Copy the snapshot artifacts and the writable overlay into the child.
-        let child_snap = child_jail.join("snapshot.file");
-        let child_mem = child_jail.join("mem.file");
-        let child_vsock = child_jail.join("vsock.sock");
-        let cp = |from: &std::path::Path, to: &std::path::Path| -> Result<()> {
-            std::fs::copy(from, to).map(|_| ()).with_context(|| format!("fork copy {from:?} -> {to:?}"))
-        };
-        cp(&parent_snap, &child_snap)?;
-        cp(&parent_mem, &child_mem)?;
-        // The parent's writable disk overlay becomes the child's starting disk.
-        let parent_overlay = parent_jail.join("overlay.ext4");
-        if parent_overlay.exists() {
-            let _ = tokio::process::Command::new("cp")
-                .args(["--reflink=auto"]).arg(&parent_overlay).arg(child_jail.join("overlay.ext4"))
-                .status().await;
-        }
-
-        // Launch the child Firecracker and load the snapshot *paused*, so we can
-        // repoint its NIC at the child's tap before it resumes.
-        let child_sock = child_jail.join("api.sock");
-        let _ = std::fs::remove_file(&child_sock);
-        let log = std::fs::File::create(child_jail.join("firecracker.log")).context("child fc log")?;
-        let log2 = log.try_clone()?;
-        let pid = tokio::process::Command::new(&self.firecracker_bin)
-            .args(["--api-sock", child_sock.to_str().unwrap()])
-            .args(self.no_seccomp.then_some("--no-seccomp"))
-            .stdout(log).stderr(log2)
-            .spawn().context("spawn child firecracker")?
-            .id();
-        for _ in 0..400 {
-            if child_sock.exists() {
-                break;
+        // Bring up the child Firecracker (jailer-aware, mirroring restore) and
+        // stage artifacts: snapshot + mem are COPIED (the child is independent),
+        // the rootfs is reflink-copied so the child gets its OWN writable disk.
+        let (child_sock, child_vsock, pid) = if self.use_jailer {
+            let jail_id = child.replace('_', "-");
+            let uid = self.jailer_uid_base + tap_idx;
+            let new_chroot = self.chroot_base.join("firecracker").join(&jail_id).join("root");
+            let log = std::fs::File::create(child_jail.join("firecracker.log")).context("child fc log")?;
+            let log2 = log.try_clone()?;
+            let pid = tokio::process::Command::new(&self.jailer_bin)
+                .args(["--id", &jail_id])
+                .args(["--exec-file", &self.firecracker_bin])
+                .args(["--uid", &uid.to_string(), "--gid", &uid.to_string()])
+                .args(["--chroot-base-dir", self.chroot_base.to_str().unwrap()])
+                .args(["--", "--api-sock", "api.sock"])
+                .args(self.no_seccomp.then_some("--no-seccomp"))
+                .stdout(log).stderr(log2)
+                .spawn().context("spawn child jailer")?
+                .id();
+            for _ in 0..400 {
+                if new_chroot.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        self.fc_api(&child_sock, "PUT", "/vsock", &json!({
-            "guest_cid": cid, "uds_path": "vsock.sock",
-        })).await?;
+            // mem.file and rootfs are the big artifacts — reflink-copy them so the
+            // child gets an instant CoW private copy (it diverges independently)
+            // instead of a multi-second full read+write of the 2 GB mem image.
+            let _ = std::fs::copy(&parent_snap, new_chroot.join("snapshot.file"));
+            let reflink = |from: PathBuf, to: PathBuf| async move {
+                let _ = tokio::process::Command::new("cp").args(["--reflink=auto"]).arg(from).arg(to).status().await;
+            };
+            reflink(parent_mem.clone(), new_chroot.join("mem.file")).await;
+            reflink(parent_jail.join("rootfs.ext4"), new_chroot.join("rootfs.ext4")).await;
+            let owner = format!("{uid}:{uid}");
+            let _ = tokio::process::Command::new("chown").arg("-R").arg(&owner).arg(&new_chroot).status().await;
+            let new_api = new_chroot.join("api.sock");
+            for _ in 0..400 {
+                if new_api.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            (new_api, new_chroot.join("vsock.sock"), pid)
+        } else {
+            let _ = std::fs::copy(&parent_snap, child_jail.join("snapshot.file"));
+            let _ = tokio::process::Command::new("cp").args(["--reflink=auto"])
+                .arg(&parent_mem).arg(child_jail.join("mem.file")).status().await;
+            if parent_jail.join("overlay.ext4").exists() {
+                let _ = tokio::process::Command::new("cp").args(["--reflink=auto"])
+                    .arg(parent_jail.join("overlay.ext4")).arg(child_jail.join("overlay.ext4")).status().await;
+            }
+            let child_sock = child_jail.join("api.sock");
+            let _ = std::fs::remove_file(&child_sock);
+            let log = std::fs::File::create(child_jail.join("firecracker.log")).context("child fc log")?;
+            let log2 = log.try_clone()?;
+            let pid = tokio::process::Command::new(&self.firecracker_bin)
+                .args(["--api-sock", child_sock.to_str().unwrap()])
+                .args(self.no_seccomp.then_some("--no-seccomp"))
+                .stdout(log).stderr(log2)
+                .spawn().context("spawn child firecracker")?
+                .id();
+            for _ in 0..400 {
+                if child_sock.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            (child_sock, child_jail.join("vsock.sock"), pid)
+        };
+
+        // Warm the child's mem file in the background, then load *paused* — load
+        // FIRST (the snapshot restores its own vsock); paths are chroot-relative
+        // under the jailer, absolute for a direct launch.
+        let (snap_api, mem_api) = if self.use_jailer {
+            ("snapshot.file".to_string(), "mem.file".to_string())
+        } else {
+            (
+                child_jail.join("snapshot.file").to_string_lossy().into_owned(),
+                child_jail.join("mem.file").to_string_lossy().into_owned(),
+            )
+        };
         if self.prewarm_mem_cache {
-            prewarm_page_cache(&child_mem).await;
+            if let Some(m) = child_sock.parent().map(|p| p.join("mem.file")) {
+                tokio::spawn(async move { prewarm_page_cache(&m).await });
+            }
         }
+        // The snapshot's NIC references the *parent's* tap, which the parent is
+        // still holding (fork keeps the parent live) — so reopening it during
+        // restore would hit EBUSY. `network_overrides` remaps eth0 to the child's
+        // own tap at load time, so it opens a free device and resumes directly.
         self.fc_api_to(&child_sock, "PUT", "/snapshot/load", &json!({
-            "snapshot_path": child_snap.to_str().unwrap(),
-            "mem_backend": { "backend_path": child_mem.to_str().unwrap(), "backend_type": "File" },
+            "snapshot_path": snap_api,
+            "mem_backend": { "backend_path": mem_api, "backend_type": "File" },
             "enable_diff_snapshots": true,
-            "resume_vm": false,
+            "network_overrides": [{ "iface_id": "eth0", "host_dev_name": tap.clone() }],
+            "resume_vm": true,
         }), 300).await?;
-        // Repoint the restored NIC at the child's own tap, then resume.
-        self.fc_api(&child_sock, "PATCH", "/network-interfaces/eth0", &json!({
-            "iface_id": "eth0", "host_dev_name": tap,
-        })).await?;
-        self.fc_api(&child_sock, "PATCH", "/vm", &json!({"state": "Resumed"})).await?;
 
         self.vms.lock().unwrap().insert(
             child.clone(),
@@ -1331,16 +1520,25 @@ impl Runtime for FirecrackerRuntime {
                 has_secrets: false,
                 standby: false,
                 snapshotted: false,
+                // Fork children never inherit volumes (exclusive attach; the
+                // service refuses to fork a volume-attached parent).
+                volumes: Vec::new(),
             },
         );
         self.persist_record(&child);
         self.await_agent(&child, Duration::from_secs(10)).await?;
         // Re-IP the guest: the snapshot carried the parent's address, which would
-        // collide on the bridge. (MAC is inherited; the isolated tap keeps that
-        // from mattering. A distinct MAC on fork is a follow-up.)
+        // collide on the bridge. Flushing eth0 also drops the connected /16 route
+        // and with it the default route, so re-add `default via the gateway` or
+        // the child loses egress/DNS. (MAC is inherited; the isolated tap keeps
+        // that from mattering. A distinct MAC on fork is a follow-up.)
         let _ = self.agent_call(&child, &json!({
             "op": "exec",
-            "cmd": format!("ip addr flush dev eth0 2>/dev/null; ip addr add {child_ip}/16 dev eth0 2>/dev/null; ip link set eth0 up 2>/dev/null; true"),
+            "cmd": format!(
+                "ip addr flush dev eth0 2>/dev/null; ip addr add {child_ip}/16 dev eth0 2>/dev/null; \
+                 ip link set eth0 up 2>/dev/null; \
+                 ip route replace default via {NET_GATEWAY} dev eth0 2>/dev/null; true"
+            ),
             "background": false,
         })).await;
         // Apply the child's own env/files/agent/mounts on top of the inherited state.
@@ -1382,6 +1580,36 @@ impl Runtime for FirecrackerRuntime {
             if let Some(c) = active_chroot {
                 let _ = std::fs::remove_dir_all(c);
             }
+        }
+        Ok(())
+    }
+
+    async fn create_volume(&self, volume_id: &str, size_gb: u32) -> Result<()> {
+        // A sparse, labelled ext4 image: disk is consumed as the guest writes,
+        // and the label lets the guest mount it independent of /dev/vdX order.
+        std::fs::create_dir_all(&self.volumes_dir).context("create volumes dir")?;
+        let path = self.volumes_dir.join(format!("{volume_id}.ext4"));
+        let f = std::fs::File::create(&path).context("create volume image")?;
+        f.set_len(size_gb as u64 * 1024 * 1024 * 1024).context("size volume image")?;
+        drop(f);
+        let label = ids::volume_label(volume_id);
+        let out = tokio::process::Command::new("mkfs.ext4")
+            .args(["-F", "-q", "-L", &label])
+            .arg(&path)
+            .output()
+            .await
+            .context("run mkfs.ext4 (is e2fsprogs installed?)")?;
+        if !out.status.success() {
+            let _ = std::fs::remove_file(&path);
+            bail!("mkfs.ext4 failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        Ok(())
+    }
+
+    async fn delete_volume(&self, volume_id: &str) -> Result<()> {
+        let path = self.volumes_dir.join(format!("{volume_id}.ext4"));
+        if path.exists() {
+            std::fs::remove_file(&path).context("remove volume image")?;
         }
         Ok(())
     }

@@ -29,7 +29,7 @@ restore_mem_backend = "file"  # "file" (eager, page-cache-prewarmed) or "uffd" (
 prewarm_mem_cache = true       # warm the snapshot mem file into page cache just before a restore
 cpu_template = ""              # e.g. "T2"/"C3" for snapshot portability across heterogeneous hosts
 # Density (roadmap Phase 3):
-shared_rootfs = false          # share one read-only base rootfs across VMs (EROFS + tmpfs + overlayfs); needs EROFS base images
+shared_rootfs = false          # share one read-only base rootfs across all VMs (hardlinked → one host page-cache copy); the guest layers tmpfs+overlayfs for writes. ext4-ro base today; erofs+DAX is a future guest-kernel rebuild
 
 [pricing]
 default_unit_price_usd_hr = 0.009

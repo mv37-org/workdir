@@ -18,7 +18,8 @@ The default create is one call with no body and yields the cheapest, fastest pat
 | `GET` | `/v1/sandboxes/:id/files?path=…` | Read a file → `{content, encoding}`. |
 | `PUT` | `/v1/sandboxes/:id/files` | `{path, content, encoding?}` → write. |
 | `POST` | `/v1/sandboxes/:id/ports/:port/expose` | → `{port, url}` preview route. |
-| `GET`/`POST` | `/v1/sandboxes/:id/browser` | Browser readiness + VNC/CDP urls. |
+| `GET`/`POST` | `/v1/sandboxes/:id/browser` | Browser readiness + VNC/CDP urls + screenshot url. |
+| `GET` | `/v1/sandboxes/:id/browser/screenshot` | PNG of the live desktop (X root window). |
 | `POST` | `/v1/sandboxes/:id/snapshot` | Snapshot (billed separately). |
 | `POST` | `/v1/sandboxes/:id/fork` | Clone an instant sibling from the parent's live state (`boot_path: "fork"`). |
 | `POST` | `/v1/sandboxes/:id/pause` | Stop (release CPU/mem; keep billing correct). |
@@ -78,7 +79,7 @@ rejected with `400 bad_request`:
 | Knob | Allowed | Default |
 |---|---|---|
 | `cpu` | 0.5, 1, 2, 4 | 1 |
-| `memory_mb` | 1024, 2048, 4096, 8192, 16384 | 2048 |
+| `memory_mb` | 512, 1024, 2048, 4096, 8192, 16384 | 2048 |
 | `disk_gb` | 8, 16, 32, 64 | 8 |
 | `image` | base, node-python, browser, heavy-build, custom/… | base |
 | `auto_stop_seconds` | 30–3600 | 120 |
@@ -148,6 +149,24 @@ Org-scoped, encrypted at rest, never returned over the API. See
 Reference secrets in `startup.secrets: ["NAME", ...]`; values are injected into
 the sandbox env after assignment. A sandbox with resident secrets cannot be
 snapshotted (`409`).
+
+## Persistent volumes (Phase 5)
+
+Org-scoped block storage that **survives sandbox deletion**, so workspace state
+persists across sessions. A volume attaches to at most one running sandbox at a
+time.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/v1/volumes` | List the org's volumes. |
+| `POST` | `/v1/volumes` | `{name, size_gb}` → create. `size_gb` ∈ {1,5,10,20,50,100,250}. |
+| `GET` | `/v1/volumes/:id` | Get one (incl. `attached_to`). |
+| `DELETE` | `/v1/volumes/:id` | Delete + free storage; `409` while attached. |
+
+Attach at sandbox-create with `volumes: [{ "volume_id": "vol_…",
+"mount_path": "/mnt/data" }]`. The volume is mounted (ext4) at `mount_path` in
+the guest; attaching forces a cold boot. Deleting the sandbox detaches the
+volume (data intact) so it can be re-attached to a new one.
 
 ## Extended create options (features)
 

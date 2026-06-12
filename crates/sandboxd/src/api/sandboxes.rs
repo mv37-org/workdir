@@ -186,9 +186,62 @@ pub async fn browser_get(
         "urls": {
             "vnc": state.preview_url(&sb.id, 6080),
             "cdp": state.preview_url(&sb.id, 9222),
-            "screenshot": format!("{}/v1/sandboxes/{}/browser/screenshot", "", sb.id),
+            "screenshot": format!("/v1/sandboxes/{}/browser/screenshot", sb.id),
         }
     })))
+}
+
+/// Capture a PNG of the browser sandbox's **live desktop** (what the VNC URL
+/// shows) by grabbing the X root window with ImageMagick, then reading the file
+/// back. Advertised by `browser_get`. Capturing the X display works regardless
+/// of whether chrome's CDP port is up, and shows the whole desktop, not just a
+/// page viewport.
+pub async fn browser_screenshot(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let sb = match load_owned(&state, &ctx, &id) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    if !sb.browser_enabled() {
+        return ApiError::BadRequest("browser is not enabled on this sandbox".into()).into_response();
+    }
+    // A parked browser sandbox transparently auto-resumes, same as exec.
+    let mut sb = match service::ensure_running(&state, sb).await {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    if !sb.state.is_active() {
+        return ApiError::Conflict(format!("sandbox is {}", sb.state.as_str())).into_response();
+    }
+    let handle = match sb.runtime_handle.clone() {
+        Some(h) => h,
+        None => return ApiError::Conflict("no runtime handle".into()).into_response(),
+    };
+    service::touch_activity(&state, &mut sb);
+    let node = state.node_for(sb.node_id.as_deref().unwrap_or(""));
+
+    // read_file confines paths under the guest workspace (/workspace), but exec
+    // runs raw — so capture INTO /workspace and read it back by the bare name,
+    // or the two reference different paths.
+    let shot_abs = "/workspace/wd-screenshot.png";
+    let cmd = format!("rm -f {shot_abs}; DISPLAY=:0 import -window root {shot_abs} 2>/dev/null; test -s {shot_abs}");
+    if let Err(e) = node
+        .exec(&handle, &ExecRequest { cmd, cwd: None, env: Default::default(), background: false })
+        .await
+    {
+        return (StatusCode::BAD_GATEWAY, format!("capture exec failed: {e}")).into_response();
+    }
+    match node.read_file(&handle, "wd-screenshot.png").await {
+        Ok(png) if !png.is_empty() => {
+            ([(axum::http::header::CONTENT_TYPE, "image/png")], png).into_response()
+        }
+        Ok(_) => (StatusCode::BAD_GATEWAY, "screenshot was empty (is the desktop up?)").into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("screenshot read failed: {e}")).into_response(),
+    }
 }
 
 pub async fn snapshot(
