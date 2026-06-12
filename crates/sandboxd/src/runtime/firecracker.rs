@@ -96,6 +96,10 @@ struct VmRecord {
     /// Parked in perpetual standby: snapshot on disk, RAM freed, tap torn down
     /// (roadmap Phase 1). `restore` brings it back.
     standby: bool,
+    /// A base (Full) snapshot's mem.file already exists for this VM, so the next
+    /// standby can take a fast Diff snapshot (only dirty pages) onto it.
+    #[serde(default)]
+    snapshotted: bool,
 }
 
 // --- sandbox networking (bridge + NAT) -------------------------------------
@@ -481,6 +485,7 @@ impl FirecrackerRuntime {
                 resident_env: Default::default(),
                 has_secrets: false,
                 standby: false,
+                snapshotted: false,
             },
         );
         self.persist_record(&handle);
@@ -741,10 +746,15 @@ impl FirecrackerRuntime {
         }
     }
 
-    /// Pause a VM and write a Full snapshot (memory + device state) into `jail`,
-    /// returning the (snapshot_file, mem_file) paths. Shared by `snapshot`,
-    /// `standby`, and `fork`.
-    async fn write_snapshot(&self, sock: &PathBuf, jail: &std::path::Path) -> Result<(PathBuf, PathBuf)> {
+    /// Pause a VM and snapshot (memory + device state) into `jail`, returning the
+    /// (snapshot_file, mem_file) paths. Shared by `snapshot`, `standby`, `fork`.
+    ///
+    /// `diff` writes a Diff snapshot — only the pages dirtied since the load are
+    /// written *onto the existing* mem.file (which holds the base), so an idle VM
+    /// snapshots in ~1-2s instead of writing the full multi-GB image. The caller
+    /// must guarantee a base mem.file already exists (a prior Full snapshot of
+    /// the same VM, persisted across the restore via hardlinks).
+    async fn write_snapshot(&self, sock: &PathBuf, jail: &std::path::Path, diff: bool) -> Result<(PathBuf, PathBuf)> {
         self.fc_api(sock, "PATCH", "/vm", &json!({"state": "Paused"})).await?;
         let snap_file = jail.join("snapshot.file");
         let mem_file = jail.join("mem.file");
@@ -760,7 +770,7 @@ impl FirecrackerRuntime {
             (snap_file.to_string_lossy().into_owned(), mem_file.to_string_lossy().into_owned())
         };
         self.fc_api_to(sock, "PUT", "/snapshot/create", &json!({
-            "snapshot_type": "Full",
+            "snapshot_type": if diff { "Diff" } else { "Full" },
             "snapshot_path": snap_api,
             "mem_file_path": mem_api,
         }), 300).await?;
@@ -983,7 +993,7 @@ impl Runtime for FirecrackerRuntime {
         // the Firecracker process so its guest RAM returns to the host, and tear
         // down the tap. The record is kept (snapshot artifacts + NIC identity) so
         // `restore` can bring the exact same VM back.
-        let (sock, jail, pid, tap, has_secrets) = {
+        let (sock, jail, pid, tap, has_secrets, snapshotted) = {
             let vms = self.vms.lock().unwrap();
             let v = vms.get(handle).ok_or_else(|| anyhow!("unknown vm {handle}"))?;
             (
@@ -992,6 +1002,7 @@ impl Runtime for FirecrackerRuntime {
                 v.pid,
                 v.tap.clone(),
                 v.has_secrets,
+                v.snapshotted,
             )
         };
         // Refuse to persist resident secrets into a snapshot (review M3).
@@ -999,8 +1010,10 @@ impl Runtime for FirecrackerRuntime {
             bail!("cannot standby a sandbox with resident secrets; remove secrets first");
         }
         let start = Instant::now();
-        // Pause + write the Full snapshot to the jail (shared helper).
-        self.write_snapshot(&sock, &jail).await?;
+        // Diff snapshot once a base exists (fast — only dirty pages); Full the
+        // first time. mem.file persists across the restore via hardlinks, so the
+        // Diff updates the current memory image in place.
+        self.write_snapshot(&sock, &jail, snapshotted).await?;
         // Free the guest RAM: SIGKILL Firecracker. The mem.file on disk now holds
         // the guest memory image.
         if let Some(pid) = pid {
@@ -1014,6 +1027,7 @@ impl Runtime for FirecrackerRuntime {
         if let Some(v) = self.vms.lock().unwrap().get_mut(handle) {
             v.pid = None;
             v.standby = true;
+            v.snapshotted = true; // a base mem.file now exists → next standby is a Diff
         }
         // Persist the now-standby record so a restart can still restore it.
         self.persist_record(handle);
@@ -1195,7 +1209,7 @@ impl Runtime for FirecrackerRuntime {
             let v = vms.get(handle).ok_or_else(|| anyhow!("unknown vm {handle}"))?;
             (v.api_sock.clone(), v.api_sock.parent().unwrap().to_path_buf())
         };
-        let (snap_file, mem_file) = self.write_snapshot(&sock, &jail).await?;
+        let (snap_file, mem_file) = self.write_snapshot(&sock, &jail, false).await?;
         let bytes = std::fs::metadata(&mem_file).map(|m| m.len()).unwrap_or(0)
             + std::fs::metadata(&snap_file).map(|m| m.len()).unwrap_or(0);
         Ok(SnapshotArtifact { handle: ids::snapshot_id(), storage_bytes: bytes })
@@ -1221,7 +1235,7 @@ impl Runtime for FirecrackerRuntime {
         let start = Instant::now();
 
         // Snapshot the parent, then resume it so the fork is non-disruptive.
-        let (parent_snap, parent_mem) = self.write_snapshot(&parent_sock, &parent_jail).await?;
+        let (parent_snap, parent_mem) = self.write_snapshot(&parent_sock, &parent_jail, false).await?;
         self.fc_api(&parent_sock, "PATCH", "/vm", &json!({"state": "Resumed"})).await?;
 
         // Stage the child VM.
@@ -1302,6 +1316,7 @@ impl Runtime for FirecrackerRuntime {
                 resident_env: Default::default(),
                 has_secrets: false,
                 standby: false,
+                snapshotted: false,
             },
         );
         self.persist_record(&child);
