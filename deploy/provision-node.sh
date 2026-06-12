@@ -51,11 +51,20 @@ fi
 log "  $(firecracker --version | head -1)"
 
 # --- 1.5 data filesystem (optional but strongly recommended) ----------------
-# Reflink copies (cp --reflink) are what make fork, golden-snapshot staging and
-# per-VM rootfs copies instant CoW instead of multi-GB I/O — measured on the
-# node: fork drops from ~58s (full 2 GB mem + 4 GB rootfs copies on ext4) to
-# roughly resume latency. Set DATA_FS_DEVICE=/dev/nvmeXnY (an EMPTY partition
-# or device) to format it XFS with reflink and mount it at $DATA_DIR.
+# Reflink copies (cp --reflink) make per-VM rootfs copies, golden-snapshot
+# staging, and fork's child artifact copies instant CoW instead of multi-GB
+# I/O. (Note: fork wall time is still dominated by the parent's Firecracker Full
+# snapshot — ~23s for 2 GB guest RAM — which reflink can't touch; reflink only
+# removes the COPY cost. Truly instant fork needs Diff snapshots or UFFD CoW.)
+#
+# Two ways to get a reflink fs at $DATA_DIR:
+#   • DATA_FS_DEVICE=/dev/nvmeXnY — an EMPTY partition/device, formatted XFS.
+#   • DATA_FS_LOOPBACK_GB=300     — no spare device (e.g. both disks in one
+#                                   RAID1): a loopback XFS image on the root fs.
+#                                   Real reflink inside XFS regardless of the
+#                                   ext4 backing (validated on the live node).
+# If $DATA_DIR already holds data, migrate it by hand (rsync into the new fs
+# before mounting) — this script only sets up an EMPTY data dir.
 if [ -n "${DATA_FS_DEVICE:-}" ]; then
   log "data filesystem: XFS (reflink=1) on ${DATA_FS_DEVICE} -> ${DATA_DIR}"
   command -v mkfs.xfs >/dev/null 2>&1 || apt-get install -y -qq xfsprogs >/dev/null
@@ -65,11 +74,24 @@ if [ -n "${DATA_FS_DEVICE:-}" ]; then
     log "  ${DATA_FS_DEVICE} already has a filesystem; NOT reformatting"
   fi
   mkdir -p "$DATA_DIR"
-  if ! mountpoint -q "$DATA_DIR"; then
-    mount "$DATA_FS_DEVICE" "$DATA_DIR"
-  fi
+  mountpoint -q "$DATA_DIR" || mount "$DATA_FS_DEVICE" "$DATA_DIR"
   grep -q "$DATA_FS_DEVICE $DATA_DIR" /etc/fstab || \
     echo "$DATA_FS_DEVICE $DATA_DIR xfs defaults,noatime 0 2" >> /etc/fstab
+elif [ -n "${DATA_FS_LOOPBACK_GB:-}" ]; then
+  IMG=/var/lib/workdir-disk.img
+  log "data filesystem: loopback XFS (reflink=1) ${DATA_FS_LOOPBACK_GB}G at ${IMG} -> ${DATA_DIR}"
+  command -v mkfs.xfs >/dev/null 2>&1 || apt-get install -y -qq xfsprogs >/dev/null
+  if [ ! -e "$IMG" ]; then
+    truncate -s "${DATA_FS_LOOPBACK_GB}G" "$IMG"
+    mkfs.xfs -q -m reflink=1 -L workdir-data "$IMG"
+  fi
+  mkdir -p "$DATA_DIR"
+  mountpoint -q "$DATA_DIR" || mount -o loop "$IMG" "$DATA_DIR"
+  grep -q "$IMG $DATA_DIR" /etc/fstab || \
+    echo "$IMG $DATA_DIR xfs loop,defaults,noatime 0 0" >> /etc/fstab
+  # The daemon must not start before this mount (it would write under it).
+  mkdir -p /etc/systemd/system/workdir.service.d
+  printf '[Unit]\nRequiresMountsFor=%s\n' "$DATA_DIR" > /etc/systemd/system/workdir.service.d/10-datamount.conf
 fi
 
 # --- 2. system user + dirs -------------------------------------------------
