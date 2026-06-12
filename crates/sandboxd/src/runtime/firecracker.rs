@@ -1251,7 +1251,7 @@ impl Runtime for FirecrackerRuntime {
         let (parent_snap, parent_mem) = self.write_snapshot(&parent_sock, &parent_jail, false).await?;
         self.fc_api(&parent_sock, "PATCH", "/vm", &json!({"state": "Resumed"})).await?;
 
-        // Stage the child VM.
+        // Stage the child VM (its own id, tap, CID, and a private disk copy).
         let child = format!("vm_{}", child_spec.sandbox_id);
         let child_jail = self.chroot_base.join(&child);
         std::fs::create_dir_all(&child_jail).context("create child jail")?;
@@ -1262,56 +1262,96 @@ impl Runtime for FirecrackerRuntime {
         let cid = self.next_cid.fetch_add(1, Ordering::SeqCst);
         setup_tap(&tap).await.context("fork: child tap")?;
 
-        // Copy the snapshot artifacts and the writable overlay into the child.
-        let child_snap = child_jail.join("snapshot.file");
-        let child_mem = child_jail.join("mem.file");
-        let child_vsock = child_jail.join("vsock.sock");
-        let cp = |from: &std::path::Path, to: &std::path::Path| -> Result<()> {
-            std::fs::copy(from, to).map(|_| ()).with_context(|| format!("fork copy {from:?} -> {to:?}"))
-        };
-        cp(&parent_snap, &child_snap)?;
-        cp(&parent_mem, &child_mem)?;
-        // The parent's writable disk overlay becomes the child's starting disk.
-        let parent_overlay = parent_jail.join("overlay.ext4");
-        if parent_overlay.exists() {
-            let _ = tokio::process::Command::new("cp")
-                .args(["--reflink=auto"]).arg(&parent_overlay).arg(child_jail.join("overlay.ext4"))
-                .status().await;
-        }
-
-        // Launch the child Firecracker and load the snapshot *paused*, so we can
-        // repoint its NIC at the child's tap before it resumes.
-        let child_sock = child_jail.join("api.sock");
-        let _ = std::fs::remove_file(&child_sock);
-        let log = std::fs::File::create(child_jail.join("firecracker.log")).context("child fc log")?;
-        let log2 = log.try_clone()?;
-        let pid = tokio::process::Command::new(&self.firecracker_bin)
-            .args(["--api-sock", child_sock.to_str().unwrap()])
-            .args(self.no_seccomp.then_some("--no-seccomp"))
-            .stdout(log).stderr(log2)
-            .spawn().context("spawn child firecracker")?
-            .id();
-        for _ in 0..400 {
-            if child_sock.exists() {
-                break;
+        // Bring up the child Firecracker (jailer-aware, mirroring restore) and
+        // stage artifacts: snapshot + mem are COPIED (the child is independent),
+        // the rootfs is reflink-copied so the child gets its OWN writable disk.
+        let (child_sock, child_vsock, pid) = if self.use_jailer {
+            let jail_id = child.replace('_', "-");
+            let uid = self.jailer_uid_base + tap_idx;
+            let new_chroot = self.chroot_base.join("firecracker").join(&jail_id).join("root");
+            let log = std::fs::File::create(child_jail.join("firecracker.log")).context("child fc log")?;
+            let log2 = log.try_clone()?;
+            let pid = tokio::process::Command::new(&self.jailer_bin)
+                .args(["--id", &jail_id])
+                .args(["--exec-file", &self.firecracker_bin])
+                .args(["--uid", &uid.to_string(), "--gid", &uid.to_string()])
+                .args(["--chroot-base-dir", self.chroot_base.to_str().unwrap()])
+                .args(["--", "--api-sock", "api.sock"])
+                .args(self.no_seccomp.then_some("--no-seccomp"))
+                .stdout(log).stderr(log2)
+                .spawn().context("spawn child jailer")?
+                .id();
+            for _ in 0..400 {
+                if new_chroot.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        self.fc_api(&child_sock, "PUT", "/vsock", &json!({
-            "guest_cid": cid, "uds_path": "vsock.sock",
-        })).await?;
+            let _ = std::fs::copy(&parent_snap, new_chroot.join("snapshot.file"));
+            let _ = std::fs::copy(&parent_mem, new_chroot.join("mem.file"));
+            let _ = tokio::process::Command::new("cp").args(["--reflink=auto"])
+                .arg(parent_jail.join("rootfs.ext4")).arg(new_chroot.join("rootfs.ext4")).status().await;
+            let owner = format!("{uid}:{uid}");
+            let _ = tokio::process::Command::new("chown").arg("-R").arg(&owner).arg(&new_chroot).status().await;
+            let new_api = new_chroot.join("api.sock");
+            for _ in 0..400 {
+                if new_api.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            (new_api, new_chroot.join("vsock.sock"), pid)
+        } else {
+            let _ = std::fs::copy(&parent_snap, child_jail.join("snapshot.file"));
+            let _ = std::fs::copy(&parent_mem, child_jail.join("mem.file"));
+            if parent_jail.join("overlay.ext4").exists() {
+                let _ = tokio::process::Command::new("cp").args(["--reflink=auto"])
+                    .arg(parent_jail.join("overlay.ext4")).arg(child_jail.join("overlay.ext4")).status().await;
+            }
+            let child_sock = child_jail.join("api.sock");
+            let _ = std::fs::remove_file(&child_sock);
+            let log = std::fs::File::create(child_jail.join("firecracker.log")).context("child fc log")?;
+            let log2 = log.try_clone()?;
+            let pid = tokio::process::Command::new(&self.firecracker_bin)
+                .args(["--api-sock", child_sock.to_str().unwrap()])
+                .args(self.no_seccomp.then_some("--no-seccomp"))
+                .stdout(log).stderr(log2)
+                .spawn().context("spawn child firecracker")?
+                .id();
+            for _ in 0..400 {
+                if child_sock.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            (child_sock, child_jail.join("vsock.sock"), pid)
+        };
+
+        // Warm the child's mem file in the background, then load *paused* — load
+        // FIRST (the snapshot restores its own vsock); paths are chroot-relative
+        // under the jailer, absolute for a direct launch.
+        let (snap_api, mem_api) = if self.use_jailer {
+            ("snapshot.file".to_string(), "mem.file".to_string())
+        } else {
+            (
+                child_jail.join("snapshot.file").to_string_lossy().into_owned(),
+                child_jail.join("mem.file").to_string_lossy().into_owned(),
+            )
+        };
         if self.prewarm_mem_cache {
-            prewarm_page_cache(&child_mem).await;
+            if let Some(m) = child_sock.parent().map(|p| p.join("mem.file")) {
+                tokio::spawn(async move { prewarm_page_cache(&m).await });
+            }
         }
         self.fc_api_to(&child_sock, "PUT", "/snapshot/load", &json!({
-            "snapshot_path": child_snap.to_str().unwrap(),
-            "mem_backend": { "backend_path": child_mem.to_str().unwrap(), "backend_type": "File" },
+            "snapshot_path": snap_api,
+            "mem_backend": { "backend_path": mem_api, "backend_type": "File" },
             "enable_diff_snapshots": true,
             "resume_vm": false,
         }), 300).await?;
         // Repoint the restored NIC at the child's own tap, then resume.
         self.fc_api(&child_sock, "PATCH", "/network-interfaces/eth0", &json!({
-            "iface_id": "eth0", "host_dev_name": tap,
+            "iface_id": "eth0", "host_dev_name": tap.clone(),
         })).await?;
         self.fc_api(&child_sock, "PATCH", "/vm", &json!({"state": "Resumed"})).await?;
 
