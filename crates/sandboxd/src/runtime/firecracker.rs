@@ -108,6 +108,15 @@ struct VmRecord {
     /// Current balloon target in MiB (0 = deflated). Soft-standby bookkeeping.
     #[serde(default)]
     ballooned_mib: u32,
+    /// Bumped on every state-mutating interaction (exec, file write, PTY,
+    /// standby/restore). Lets fork reuse a still-valid parent snapshot.
+    #[serde(default)]
+    mutation_seq: u64,
+    /// The `mutation_seq` captured by the parent's last fork snapshot. While it
+    /// still equals `mutation_seq` (and the artifacts exist), fan-out forks skip
+    /// the ~23s Full snapshot and reflink straight from the cached one.
+    #[serde(default)]
+    fork_cache_seq: Option<u64>,
 }
 
 /// One attached persistent volume as the runtime staged it.
@@ -760,6 +769,8 @@ impl FirecrackerRuntime {
                 snapshotted: false,
                 volumes: vol_stages.clone(),
                 ballooned_mib: 0,
+                mutation_seq: 0,
+                fork_cache_seq: None,
             },
         );
         self.persist_record(&handle);
@@ -1057,6 +1068,15 @@ impl FirecrackerRuntime {
         self.chroot_base.join(handle)
     }
 
+    /// Record a state-mutating interaction with `handle` (exec, file write,
+    /// PTY, park/wake). Invalidates the fork snapshot cache: the next fork must
+    /// take a fresh snapshot to honor "clone of the parent's live state".
+    fn bump_mutation(&self, handle: &str) {
+        if let Some(v) = self.vms.lock().unwrap().get_mut(handle) {
+            v.mutation_seq += 1;
+        }
+    }
+
     /// Persist the in-memory record for `handle` to its jail dir, so a standby
     /// VM can be restored after a control-plane restart drops the in-memory map
     /// (roadmap Phase 1). Best effort.
@@ -1161,6 +1181,23 @@ impl FirecrackerRuntime {
             return None;
         }
         self.jail_pool.lock().unwrap().pop()
+    }
+
+    /// A golden snapshot is FRESH only while it is newer than the image rootfs
+    /// it was produced from. After an image rebuild (e.g. security patches) a
+    /// stale golden would silently keep serving the old userland to every
+    /// restore and warm VM — compare mtimes so the warmer regenerates instead.
+    fn golden_fresh(&self, image_key: &str, resources: &crate::knobs::Resources) -> bool {
+        let golden = self.golden_dir(image_key, resources).join("snapshot.file");
+        let rootfs = self.images_dir.join(image_key).join("rootfs.ext4");
+        match (std::fs::metadata(&golden).and_then(|m| m.modified()),
+               std::fs::metadata(&rootfs).and_then(|m| m.modified()))
+        {
+            (Ok(g), Ok(r)) => g >= r,
+            // No rootfs to compare against (custom layouts): existence rules.
+            (Ok(_), Err(_)) => true,
+            _ => false,
+        }
     }
 
     /// Where the golden (per image+shape) snapshot artifacts live:
@@ -1281,6 +1318,8 @@ impl FirecrackerRuntime {
                 snapshotted: false,
                 volumes: Vec::new(),
                 ballooned_mib: 0,
+                mutation_seq: 0,
+                fork_cache_seq: None,
             },
         );
         self.persist_record(&handle);
@@ -1489,6 +1528,7 @@ impl Runtime for FirecrackerRuntime {
     }
 
     async fn balloon(&self, handle: &str, amount_mib: u32) -> Result<()> {
+        self.bump_mutation(handle);
         if !self.balloon {
             bail!("balloon device disabled (runtime.balloon = false)");
         }
@@ -1539,8 +1579,13 @@ impl Runtime for FirecrackerRuntime {
         // Jailer-only: a snapshot restores its vsock at the uds path captured at
         // snapshot time. Under the jailer that path is chroot-relative, so every
         // sibling gets its own socket in its own chroot; a direct launch bakes
-        // in an absolute path that would collide across siblings.
-        self.use_jailer && self.golden_dir(image_key, resources).join("snapshot.file").exists()
+        // in an absolute path that would collide across siblings. A golden older
+        // than its image rootfs is STALE (the image was rebuilt) and is treated
+        // as absent so creates cold-boot the new userland until the warmer
+        // regenerates it.
+        self.use_jailer
+            && self.golden_dir(image_key, resources).join("snapshot.file").exists()
+            && self.golden_fresh(image_key, resources)
     }
 
     async fn ensure_golden_snapshot(&self, spec: &VmSpec) -> Result<bool> {
@@ -1548,14 +1593,22 @@ impl Runtime for FirecrackerRuntime {
             return Ok(false);
         }
         let dir = self.golden_dir(&spec.image_key, &spec.resources);
-        if dir.join("snapshot.file").exists() {
+        let fresh = |s: &Self| {
+            dir.join("snapshot.file").exists() && s.golden_fresh(&spec.image_key, &spec.resources)
+        };
+        if fresh(self) {
             return Ok(false);
         }
         // One golden production at a time (a throwaway VM boot + full-RAM
         // snapshot); re-check under the lock so racers don't double-produce.
         let _serialize = self.golden_lock.lock().await;
-        if dir.join("snapshot.file").exists() {
+        if fresh(self) {
             return Ok(false);
+        }
+        // Stale artifacts (image rebuilt since) are removed before reproducing;
+        // hardlinked copies in running VMs' chroots keep their inodes alive.
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
         }
         self.produce_golden_snapshot(spec).await?;
         Ok(true)
@@ -1611,6 +1664,7 @@ impl Runtime for FirecrackerRuntime {
     }
 
     async fn exec(&self, handle: &str, req: &ExecRequest) -> Result<ExecResult> {
+        self.bump_mutation(handle);
         // Merge resident env (startup env + injected secrets) under per-call env.
         let mut merged: std::collections::BTreeMap<String, String> = {
             let vms = self.vms.lock().unwrap();
@@ -1638,6 +1692,7 @@ impl Runtime for FirecrackerRuntime {
     }
 
     async fn open_pty(&self, handle: &str) -> Result<PtySession> {
+        self.bump_mutation(handle);
         // A REAL in-guest TTY over vsock: open a dedicated stream, ask the
         // agent for a pty (it openpty()s and spawns the shell on the slave),
         // then hand the raw stream to the websocket bridge. The guest agent is
@@ -1687,6 +1742,7 @@ impl Runtime for FirecrackerRuntime {
     }
 
     async fn write_file(&self, handle: &str, path: &str, bytes: &[u8]) -> Result<()> {
+        self.bump_mutation(handle);
         let jailed = jail_guest_path(path)?;
         let b64 = base64_encode(bytes);
         self.agent_call(handle, &json!({"op": "write_file", "path": jailed, "content_b64": b64})).await?;
@@ -1748,6 +1804,7 @@ impl Runtime for FirecrackerRuntime {
     }
 
     async fn standby(&self, handle: &str) -> Result<u64> {
+        self.bump_mutation(handle);
         // Perpetual standby (roadmap Phase 1): snapshot the VM to disk, then kill
         // the Firecracker process so its guest RAM returns to the host, and tear
         // down the tap. The record is kept (snapshot artifacts + NIC identity) so
@@ -1794,6 +1851,7 @@ impl Runtime for FirecrackerRuntime {
     }
 
     async fn restore(&self, handle: &str) -> Result<u64> {
+        self.bump_mutation(handle);
         // Bring a standby VM back from its on-disk snapshot. Recreate the host
         // tap (the eviction tore it down), relaunch Firecracker, load the
         // snapshot, and wait for the guest agent. After a control-plane restart
@@ -2010,7 +2068,7 @@ impl Runtime for FirecrackerRuntime {
         // Clone a sibling from the parent's live snapshot (roadmap Phase 3). The
         // parent keeps running; the child gets its own disk copy, host tap, CID,
         // and (re-IP'd) guest networking.
-        let (parent_sock, parent_jail, parent_image, has_secrets) = {
+        let (parent_sock, parent_jail, parent_image, has_secrets, mutation_seq, cache_seq) = {
             let vms = self.vms.lock().unwrap();
             let v = vms.get(parent_handle).ok_or_else(|| anyhow!("unknown parent vm {parent_handle}"))?;
             (
@@ -2018,6 +2076,8 @@ impl Runtime for FirecrackerRuntime {
                 v.api_sock.parent().unwrap().to_path_buf(),
                 v.image_key.clone(),
                 v.has_secrets,
+                v.mutation_seq,
+                v.fork_cache_seq,
             )
         };
         if has_secrets {
@@ -2025,9 +2085,33 @@ impl Runtime for FirecrackerRuntime {
         }
         let start = Instant::now();
 
-        // Snapshot the parent, then resume it so the fork is non-disruptive.
-        let (parent_snap, parent_mem) = self.write_snapshot(&parent_sock, &parent_jail, false).await?;
-        self.fc_api(&parent_sock, "PATCH", "/vm", &json!({"state": "Resumed"})).await?;
+        // The parent's Full snapshot (~23s for 2 GB guest RAM) dominates fork —
+        // and fan-out (fork × N from one parent) re-paid it every time for an
+        // identical state. Reuse the cached snapshot while the parent has had NO
+        // state-mutating interaction since it was taken (`mutation_seq`
+        // unchanged: no exec, file write, PTY, park/wake). Internal background
+        // activity inside an untouched parent is not tracked — the contract is
+        // "the parent's state as of its last interaction", which is exactly
+        // what fan-out callers mean.
+        let parent_snap = parent_jail.join("snapshot.file");
+        let parent_mem = parent_jail.join("mem.file");
+        let cache_valid =
+            cache_seq == Some(mutation_seq) && parent_snap.exists() && parent_mem.exists();
+        if cache_valid {
+            tracing::info!(parent = %parent_handle, "fork: reusing cached parent snapshot");
+        } else {
+            // Snapshot the parent, then resume it so the fork is non-disruptive.
+            self.write_snapshot(&parent_sock, &parent_jail, false).await?;
+            self.fc_api(&parent_sock, "PATCH", "/vm", &json!({"state": "Resumed"})).await?;
+            if let Some(v) = self.vms.lock().unwrap().get_mut(parent_handle) {
+                v.fork_cache_seq = Some(v.mutation_seq);
+                // A full mem.file base now exists; the parent's next standby can
+                // take a Diff onto it (Firecracker resets dirty tracking at each
+                // snapshot create, so the chain stays consistent).
+                v.snapshotted = true;
+            }
+            self.persist_record(parent_handle);
+        }
 
         // Stage the child VM (its own id, tap, CID, and a private disk copy).
         let child = format!("vm_{}", child_spec.sandbox_id);
@@ -2144,6 +2228,8 @@ impl Runtime for FirecrackerRuntime {
                 // service refuses to fork a volume-attached parent).
                 volumes: Vec::new(),
                 ballooned_mib: 0,
+                mutation_seq: 0,
+                fork_cache_seq: None,
             },
         );
         self.persist_record(&child);
@@ -2352,6 +2438,8 @@ mod tests {
             snapshotted: true,
             volumes: Vec::new(),
             ballooned_mib: 0,
+            mutation_seq: 0,
+            fork_cache_seq: None,
         }
     }
 

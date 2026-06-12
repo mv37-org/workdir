@@ -1,0 +1,6 @@
+[Unit]
+Description=workdir node watchdog (daemon/disk/journal/pool checks, alerts on transition)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/workdir-watchdog
