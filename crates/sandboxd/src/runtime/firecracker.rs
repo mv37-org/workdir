@@ -972,14 +972,13 @@ impl Runtime for FirecrackerRuntime {
         // snapshot, and wait for the guest agent. After a control-plane restart
         // the in-memory record is gone, so rehydrate it from disk first.
         self.ensure_record_loaded(handle);
-        let (api_sock, jail, vsock_uds, cid, tap, tap_idx) = {
+        let (api_sock, jail, vsock_uds, tap, tap_idx) = {
             let vms = self.vms.lock().unwrap();
             let v = vms.get(handle).ok_or_else(|| anyhow!("unknown vm {handle} (no persisted record)"))?;
             (
                 v.api_sock.clone(),
                 v.api_sock.parent().unwrap().to_path_buf(),
                 v.vsock_uds.clone(),
-                v.cid,
                 v.tap.clone(),
                 v.tap_idx,
             )
@@ -1044,9 +1043,10 @@ impl Runtime for FirecrackerRuntime {
             if self.prewarm_mem_cache {
                 prewarm_page_cache(&new_mem).await;
             }
-            self.fc_api(&new_api, "PUT", "/vsock", &json!({
-                "guest_cid": cid, "uds_path": "vsock.sock",
-            })).await?;
+            // Load FIRST: a snapshot restores all its devices (incl. the vsock,
+            // recreated at its stored relative "vsock.sock" inside this chroot).
+            // Configuring anything beforehand makes Firecracker reject the load
+            // ("not allowed after configuring boot-specific resources").
             self.fc_api_to(&new_api, "PUT", "/snapshot/load", &json!({
                 "snapshot_path": "snapshot.file",
                 "mem_backend": { "backend_path": "mem.file", "backend_type": "File" },
@@ -1089,14 +1089,8 @@ impl Runtime for FirecrackerRuntime {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        // Re-establish the vsock backend (host UDS is not part of the snapshot)
-        // at the ABSOLUTE host path, so the unchrooted relaunch creates the socket
-        // exactly where the host agent connects.
-        self.fc_api(&api_sock, "PUT", "/vsock", &json!({
-            "guest_cid": cid,
-            "uds_path": vsock_uds.to_str().unwrap(),
-        })).await?;
-
+        // Load FIRST (no device config beforehand): the snapshot restores the
+        // vsock device at its stored absolute uds path, where the host connects.
         let snap_file = jail.join("snapshot.file");
         let mem_file = jail.join("mem.file");
         // Phase 2 lever #2: warm the mem file into page cache before load.
