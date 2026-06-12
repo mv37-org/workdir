@@ -36,6 +36,9 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null
 mkdir -p /workspace /run /tmp
 
+# Loopback up first, unconditionally: localhost services (dev servers, the
+# startup ready.http://127.0.0.1 check) bind 127.0.0.1; lo DOWN => EADDRNOTAVAIL.
+ip link set lo up
 WDIP=""; WDGW=""; WDDNS="1.1.1.1"
 for tok in $(cat /proc/cmdline); do
   case "$tok" in

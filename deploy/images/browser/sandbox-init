@@ -34,6 +34,10 @@ mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null
 mkdir -p /workspace /run /tmp /var/log
 
 # --- network (eth0 from kernel cmdline) ---
+# Bring loopback up first, unconditionally: Chrome binds its DevTools/CDP server
+# to 127.0.0.1 (and the socat forward targets 127.0.0.1:9222). With lo DOWN the
+# bind fails with EADDRNOTAVAIL and CDP never starts — independent of any eth0.
+ip link set lo up
 WDIP=""; WDGW=""; WDDNS="1.1.1.1"
 for tok in $(cat /proc/cmdline); do
   case "$tok" in

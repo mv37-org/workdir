@@ -216,6 +216,40 @@ WebSocket/CDP/VNC upgrades are bridged. Requires a valid API key (header or
 `?key=`) belonging to the sandbox's org. A path-based form
 `/_preview/<id>/<port>/<rest>` exists for environments without wildcard DNS.
 
+### Driving the browser over CDP
+
+For `browser` sandboxes the create/get response includes `urls.cdp`
+(`https://<id>-9222.<domain>`). It speaks the Chrome DevTools Protocol, so any
+CDP client — Playwright, Puppeteer, `chrome-remote-interface` — can drive the
+live Chrome.
+
+Like every preview route it **requires your API key** (any key in the sandbox's
+org, or admin), passed as a `?key=` query param or an `Authorization: Bearer`
+header. An unauthenticated request returns `404` by design — existence is never
+leaked across orgs. The `key=` param is stripped before the request reaches
+Chrome and redacted from logs, so it is safe in the URL; prefer it for WebSocket
+clients that cannot set headers on the upgrade.
+
+```js
+import { chromium } from "playwright";
+
+// query-param auth — most portable; also covers the raw WebSocket upgrade
+const browser = await chromium.connectOverCDP(`${cdpUrl}?key=${apiKey}`);
+
+// or header auth
+// const browser = await chromium.connectOverCDP(cdpUrl, {
+//   headers: { Authorization: `Bearer ${apiKey}` },
+// });
+
+const page = await browser.newPage();
+await page.goto("https://example.com");
+```
+
+Chrome advertises an internal `webSocketDebuggerUrl` (the guest IP); Playwright
+and Puppeteer rewrite it to the endpoint host automatically, so no extra config
+is needed. `GET /json/version` and `/json/list` work the same way for manual
+target discovery.
+
 ## Error codes
 
 `bad_request` (400), `unauthorized` (401), `forbidden` (403), `not_found` (404),
