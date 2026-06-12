@@ -90,15 +90,25 @@ distinct issues, all fixed:
 Ruled out along the way (with evidence): seccomp (`--no-seccomp`, `Seccomp: 0`),
 `RLIMIT_FSIZE` (unlimited), cgroup OOM (`oom_kill 0`).
 
-### Remaining follow-ups (not blockers)
+### Follow-ups — all three landed
 
-- **Eviction is ~36 s** (a full 2 GB snapshot at the node's ~137 MB/s). It is a
-  background reaper op, but **diff snapshots** (now possible — `track_dirty_pages`
-  is on) would make an idle VM snapshot in ~1–2 s. Smaller base VMs also help.
-- `delete()`/restore can leak jail/chroot dirs (disk-only, reflink-cheap);
-  `delete()` now cleans the active restore chroot, but a periodic sweep is wanted.
-- Resume is ~240 ms (Phase 1 target met-ish); UFFD demand paging is the Phase 2
-  path to < 25 ms.
+- **Diff snapshots ✅** — re-standby takes a Diff (only dirty pages, written onto
+  the persisted base mem.file) once a base exists; eviction dropped from ~25-36 s
+  (Full, first time) to ~0–7 s. The key was re-enabling dirty tracking on load
+  (`enable_diff_snapshots: true`); `track_dirty_pages` is **not** preserved in a
+  snapshot. State verified intact across repeated cycles.
+- **Periodic jail-dir sweep ✅** — `Runtime::gc_stale_jails` + a 5-min background
+  loop reclaim per-VM jail/chroot dirs not owned by a live VM and older than 120 s
+  (live VMs are never touched). Verified on the node (`removed=N` in the journal).
+- **Demand paging ✅ (resume now ~25 ms)** — the `File` backend already
+  demand-pages (Firecracker mmaps mem.file; the kernel serves guest faults
+  lazily). The eager `prewarm_page_cache` was a 2 GB read on the resume critical
+  path; moving it to a background task dropped **warm resume 252 ms → 32 ms** and
+  **cold resume (page cache dropped) 1349 ms → 140 ms** — at/near the Phase 2
+  `< 25 ms` target without a userspace handler. A real userfaultfd handler buys
+  little more here (the File mmap is already lazy; the residual ~30 ms floor is
+  the jailer relaunch, which a ready-Firecracker pool — not UFFD — would address);
+  it remains worthwhile only for future post-copy live migration.
 
 ## Phases
 
