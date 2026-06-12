@@ -6,6 +6,28 @@
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export DISPLAY=:0
 mount -t proc proc /proc 2>/dev/null
+
+# Phase 3 density: when the host shares one read-only base across VMs
+# (wd.overlay=tmpfs, root mounted ro), layer a per-VM tmpfs over it with
+# overlayfs and pivot_root into the writable merged root. Skipped on the
+# post-pivot re-exec (root already overlay) and on normal rw-root boots.
+if grep -qw wd.overlay=tmpfs /proc/cmdline 2>/dev/null \
+   && ! grep -qE '^[^ ]+ / overlay ' /proc/mounts 2>/dev/null; then
+  mount -t tmpfs tmpfs /mnt 2>/dev/null
+  mkdir -p /mnt/upper /mnt/work /mnt/root
+  if mount -t overlay overlay \
+       -o lowerdir=/,upperdir=/mnt/upper,workdir=/mnt/work /mnt/root 2>/dev/null; then
+    mkdir -p /mnt/root/oldroot
+    cd /mnt/root
+    if pivot_root . oldroot 2>/dev/null; then
+      cd /
+      mount -t proc proc /proc 2>/dev/null
+      exec /sbin/sandbox-init
+    fi
+    cd /
+  fi
+fi
+
 mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null

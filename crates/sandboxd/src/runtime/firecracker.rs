@@ -223,6 +223,18 @@ impl FirecrackerRuntime {
         }
     }
 
+    /// Whether THIS VM should share one read-only base + guest overlay (Phase 3
+    /// density). Gated per image: only images whose `sandbox-init` can pivot into
+    /// a tmpfs+overlayfs root qualify (base, browser). node-python/custom keep a
+    /// per-VM writable COW copy, so enabling `shared_rootfs` globally never gives
+    /// them a read-only root they can't write to.
+    fn shared_for(&self, spec: &VmSpec) -> bool {
+        self.shared_rootfs
+            && crate::catalog::classify(&spec.image_key)
+                .map(|c| c.supports_shared_rootfs())
+                .unwrap_or(false)
+    }
+
     /// Read-only curated/custom rootfs artifact path for an image key/ref.
     fn rootfs_path(&self, spec: &VmSpec) -> PathBuf {
         // Curated: images_dir/<key>/rootfs.ext4. Custom: images_dir/custom/<...>.
@@ -430,7 +442,7 @@ impl FirecrackerRuntime {
             // jailed uid still opens it read-only. The guest layers tmpfs+overlayfs
             // for writes (wd.overlay=tmpfs). Without sharing, give each VM its own
             // reflinked COW copy (chowned to the jailed uid) as before.
-            if self.shared_rootfs && std::fs::hard_link(&rootfs, &rdst).is_ok() {
+            if self.shared_for(spec) && std::fs::hard_link(&rootfs, &rdst).is_ok() {
                 // shared inode staged (read-only, world-readable)
             } else {
                 tokio::process::Command::new("cp").args(["--reflink=auto"]).arg(&rootfs).arg(&rdst).status().await
@@ -454,7 +466,7 @@ impl FirecrackerRuntime {
             // across all sandboxes; DAX-mappable) and the guest layers a
             // tmpfs+overlayfs for writes — no per-VM rootfs copy at all.
             // Otherwise, give the VM its own reflinked COW overlay.
-            let root_disk = if self.shared_rootfs {
+            let root_disk = if self.shared_for(spec) {
                 rootfs.to_string_lossy().into_owned()
             } else {
                 let overlay = jail.join("overlay.ext4");
@@ -555,7 +567,7 @@ impl FirecrackerRuntime {
                 // configures eth0 from them (no in-guest DHCP needed). With a
                 // shared read-only base, mount it `ro` and signal the guest init
                 // to layer a tmpfs+overlayfs so writes land in RAM (Phase 3).
-                let (root_mode, overlay_arg) = if self.shared_rootfs {
+                let (root_mode, overlay_arg) = if self.shared_for(spec) {
                     ("ro", " wd.overlay=tmpfs")
                 } else {
                     ("rw", "")
@@ -572,7 +584,7 @@ impl FirecrackerRuntime {
                     "drive_id": "rootfs",
                     "path_on_host": rootfs_fc,
                     "is_root_device": true,
-                    "is_read_only": self.shared_rootfs,
+                    "is_read_only": self.shared_for(spec),
                 })).await?;
                 self.fc_api(&api_sock, "PUT", "/network-interfaces/eth0", &json!({
                     "iface_id": "eth0",

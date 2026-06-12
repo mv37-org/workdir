@@ -75,6 +75,15 @@ impl ImageClass {
         }
     }
 
+    /// Whether this image's guest `sandbox-init` can pivot into a tmpfs+overlayfs
+    /// root, so the host may share ONE read-only base across VMs (Phase 3
+    /// density). Only images with an overlay-aware init qualify; others keep a
+    /// per-VM writable COW copy. node-python's init is not overlay-aware yet, and
+    /// custom images carry arbitrary inits, so both stay unshared.
+    pub fn supports_shared_rootfs(&self) -> bool {
+        matches!(self, ImageClass::Base | ImageClass::Browser)
+    }
+
     pub fn hot_pool_priority(&self) -> HotPoolPriority {
         match self {
             ImageClass::Base => HotPoolPriority::Highest,
