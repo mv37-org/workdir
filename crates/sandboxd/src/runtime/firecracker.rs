@@ -1376,11 +1376,17 @@ impl Runtime for FirecrackerRuntime {
         self.persist_record(&child);
         self.await_agent(&child, Duration::from_secs(10)).await?;
         // Re-IP the guest: the snapshot carried the parent's address, which would
-        // collide on the bridge. (MAC is inherited; the isolated tap keeps that
-        // from mattering. A distinct MAC on fork is a follow-up.)
+        // collide on the bridge. Flushing eth0 also drops the connected /16 route
+        // and with it the default route, so re-add `default via the gateway` or
+        // the child loses egress/DNS. (MAC is inherited; the isolated tap keeps
+        // that from mattering. A distinct MAC on fork is a follow-up.)
         let _ = self.agent_call(&child, &json!({
             "op": "exec",
-            "cmd": format!("ip addr flush dev eth0 2>/dev/null; ip addr add {child_ip}/16 dev eth0 2>/dev/null; ip link set eth0 up 2>/dev/null; true"),
+            "cmd": format!(
+                "ip addr flush dev eth0 2>/dev/null; ip addr add {child_ip}/16 dev eth0 2>/dev/null; \
+                 ip link set eth0 up 2>/dev/null; \
+                 ip route replace default via {NET_GATEWAY} dev eth0 2>/dev/null; true"
+            ),
             "background": false,
         })).await;
         // Apply the child's own env/files/agent/mounts on top of the inherited state.
