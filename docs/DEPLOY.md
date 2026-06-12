@@ -45,6 +45,21 @@ scp target/release/workdir root@<node>:/usr/local/bin/workdir
 The guest agent (`target/release/sandbox-guest-agent`) is baked into the curated
 rootfs images, not installed on the host.
 
+**For the custom-image builder**, also stage a **static (musl)** agent at
+`<data_dir>/sandbox-guest-agent-static` — the builder injects it into custom
+images so musl-based ones (alpine, `docker:dind`) boot (a glibc agent can't exec
+there and panics the guest). Build it once on the node:
+
+```bash
+rustup target add x86_64-unknown-linux-musl   # one-time; needs musl-tools
+cargo build --release -p guest-agent --target x86_64-unknown-linux-musl
+install -m755 target/x86_64-unknown-linux-musl/release/sandbox-guest-agent \
+  /var/lib/workdir/sandbox-guest-agent-static
+```
+
+Without it the builder falls back to the dynamic agent (which only boots
+glibc-based custom images) and logs a warning in the build log.
+
 ---
 
 ## 3. Single-node install (all-in-one)

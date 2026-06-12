@@ -161,6 +161,19 @@ log "building workdir (this takes a few minutes)"
 install -m755 "$REPO_ROOT/target/release/workdir" /usr/local/bin/workdir
 install -m755 "$REPO_ROOT/target/release/sandbox-guest-agent" "$DATA_DIR/sandbox-guest-agent"
 
+# Static (musl) guest agent for the custom-image builder: injected into custom
+# images so musl userlands (alpine, docker:dind) boot. Best-effort — the builder
+# falls back to the dynamic agent (glibc-only) and warns if this is absent.
+if rustup target list --installed 2>/dev/null | grep -q x86_64-unknown-linux-musl || rustup target add x86_64-unknown-linux-musl 2>/dev/null; then
+  command -v musl-gcc >/dev/null 2>&1 || apt-get install -y -qq musl-tools >/dev/null 2>&1 || true
+  if ( cd "$REPO_ROOT" && cargo build --release -p guest-agent --target x86_64-unknown-linux-musl ) 2>/dev/null; then
+    install -m755 "$REPO_ROOT/target/x86_64-unknown-linux-musl/release/sandbox-guest-agent" "$DATA_DIR/sandbox-guest-agent-static"
+    log "  staged static (musl) agent for the custom-image builder"
+  else
+    log "  WARNING: static agent build failed — custom musl images (alpine) won't boot until staged"
+  fi
+fi
+
 # --- 6. base image ---------------------------------------------------------
 log "building base curated image"
 bash "$REPO_ROOT/deploy/build-image.sh" base

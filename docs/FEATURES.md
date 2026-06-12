@@ -56,12 +56,40 @@ rejects `docker.enabled` on `base` with a `400`.
 
 **Guest requirements** (baked into the docker-capable rootfs at image-build
 time): `dockerd` + `containerd` + `runc`, an overlayfs-capable guest kernel
-(`CONFIG_OVERLAY_FS`), cgroups v2, and `iptables`. On boot the runtime starts
-`dockerd` on `unix:///var/run/docker.sock` and waits for the socket. After that,
+(`CONFIG_OVERLAY_FS`), and cgroups v2. On boot the runtime starts `dockerd` on
+`unix:///var/run/docker.sock` and waits for the socket. After that,
 `docker build` / `docker run` work normally inside the sandbox via `exec`.
+
+**Networking trade-off.** The stock Firecracker guest kernel ships **without
+netfilter** (`nf_tables`), so the runtime starts the daemon with
+`--iptables=false --bridge=none` — otherwise dockerd's default bridge/NAT setup
+fails to initialize and the daemon exits before opening its socket. The daemon
+comes up in ~3s and `docker build` / `docker run` work (validated with
+`docker run hello-world` on the node). Containers that need **outbound
+networking** via the default bridge require a netfilter-capable guest kernel — a
+deliberate microVM trade-off, not a bug.
 
 > Nested KVM is **not** required — containers share the guest kernel. The only
 > host requirement is the same `/dev/kvm` Firecracker already needs.
+
+### Building a docker-capable custom image
+
+`docker:dind` (or any image bundling `dockerd`) works directly:
+
+```bash
+# 1. publish it
+POST /v1/images { "source": {"type":"oci","image_ref":"docker:27-dind"},
+                  "name": "custom/acme/dind",
+                  "resources_hint": {"cpu":2,"memory_mb":4096,"disk_gb":16} }
+# 2. run it with dockerd auto-started
+POST /v1/sandboxes { "image":"custom/acme/dind",
+                     "resources":{"cpu":2,"memory_mb":4096,"disk_gb":16},
+                     "docker":{"enabled":true} }
+```
+
+The image builder injects a **statically-linked** guest agent, so musl-based
+images (alpine, `docker:dind`) boot fine — a glibc agent would fail to exec and
+panic the guest.
 
 ---
 
