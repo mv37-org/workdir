@@ -8,6 +8,7 @@ use crate::runtime::ExecRequest;
 use crate::service;
 use crate::state::AppState;
 use crate::views::sandbox_view;
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
@@ -18,10 +19,21 @@ use std::collections::BTreeMap;
 pub async fn create(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
-    body: Option<Json<CreateSandboxRequest>>,
+    body: Bytes,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    // Body is optional so `client.sandboxes.create()` (no body) works.
-    let req = body.map(|Json(b)| b).unwrap_or_default();
+    // An EMPTY body is the no-arg default create (`client.sandboxes.create()`).
+    // A NON-empty body must parse — otherwise reject it. Using
+    // `Option<Json<…>>` here silently turned a malformed/typo'd body (e.g.
+    // `"docker": true` instead of `{"enabled": true}`) into a default *base*
+    // sandbox: the caller asked for docker / a custom image / a browser and got
+    // a plain box with no error. That is exactly the kind of magic this product
+    // refuses — a create either does what you asked or tells you why it can't.
+    let req: CreateSandboxRequest = if body.is_empty() {
+        CreateSandboxRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ApiError::BadRequest(format!("invalid create body: {e}")))?
+    };
     let sb = service::create_sandbox(&state, &ctx, req).await?;
     Ok((StatusCode::CREATED, Json(sandbox_view(&state, &sb))))
 }

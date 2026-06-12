@@ -147,10 +147,15 @@ pub(crate) fn image_view(img: &CustomImage) -> Value {
     })
 }
 
-/// Mock image builder. The production builder runs the §10.3/§11 pipeline:
-/// build rootfs deterministically, inject + validate the guest agent, boot,
-/// health-check, scrub secrets, snapshot, and publish an immutable version.
+/// Kick off the asynchronous build. On a Firecracker node this runs the REAL
+/// pipeline (`crate::builder`): docker pull/build → export → inject the guest
+/// agent + a socat-free init → pack a labelled ext4 under images_dir/custom.
+/// The mock runtime keeps the simulation below so dev flows work anywhere.
 fn spawn_build(state: AppState, image_id: String) {
+    if state.cfg.runtime.kind == "firecracker" {
+        tokio::spawn(crate::builder::build(state, image_id));
+        return;
+    }
     tokio::spawn(async move {
         let steps = [
             ("fetching build context", 150u64),

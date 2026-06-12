@@ -284,6 +284,31 @@ async fn docker_requires_capable_image() {
 }
 
 #[tokio::test]
+async fn malformed_create_body_is_rejected_not_silently_defaulted() {
+    // Regression: a body that doesn't match the schema (here `docker` as a bare
+    // bool instead of `{enabled}`) must 400 — NOT fall through to a default base
+    // sandbox. The caller asked for something specific; a wrong-shaped request
+    // should fail loudly, not hand back a plain box.
+    let (base, key, _tmp) = spawn_server().await;
+    let c = client();
+    let auth = format!("Bearer {key}");
+
+    let r = c
+        .post(format!("{base}/v1/sandboxes"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({"docker": true})) // wrong shape
+        .send().await.unwrap();
+    assert_eq!(r.status(), 400, "a malformed create body must be rejected");
+
+    // An empty body is still the valid no-arg default create.
+    let r = c
+        .post(format!("{base}/v1/sandboxes"))
+        .header("authorization", &auth)
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201, "no-body create must still default cleanly");
+}
+
+#[tokio::test]
 async fn coding_agent_is_opt_in_and_validated() {
     let (base, key, _tmp) = spawn_server().await;
     let c = client();

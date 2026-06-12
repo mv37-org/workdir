@@ -965,10 +965,19 @@ impl FirecrackerRuntime {
         // isolation boundary). Requires a docker-capable image + guest kernel
         // (overlayfs, cgroups, iptables). The host socket is never exposed.
         if spec.docker {
+            // The minimal Firecracker guest kernel ships without netfilter
+            // (nf_tables), so dockerd's default bridge/NAT setup fails to
+            // initialize and the daemon exits before opening its socket
+            // (`iptables: Failed to initialize nft: Protocol not supported`,
+            // observed on the node). `--iptables=false --bridge=none` skips the
+            // network controller dockerd can't build here; the daemon comes up
+            // in ~3s and `docker build` / `docker run` work (validated with
+            // hello-world). Containers needing outbound networking require a
+            // netfilter-capable guest kernel — a deliberate microVM trade-off.
             let _ = self
                 .agent_call(handle, &json!({
                     "op": "exec",
-                    "cmd": "nohup dockerd --host=unix:///var/run/docker.sock >/var/log/dockerd.log 2>&1 & \
+                    "cmd": "nohup dockerd --host=unix:///var/run/docker.sock --iptables=false --bridge=none >/var/log/dockerd.log 2>&1 & \
                             for i in $(seq 1 50); do [ -S /var/run/docker.sock ] && break; sleep 0.2; done",
                     "background": false,
                 }))

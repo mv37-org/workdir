@@ -189,6 +189,17 @@ fn b64_decode(input: &str) -> Result<Vec<u8>, String> {
 }
 
 fn main() {
+    // `--vsock-listen <port>`: accept AF_VSOCK connections ourselves and serve
+    // each by re-executing this binary with the socket as its stdio — the same
+    // one-process-per-connection model the curated images get from
+    // `socat VSOCK-LISTEN:...,fork EXEC:agent`, without needing socat in the
+    // image. This is what the custom-image init uses.
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 3 && args[1] == "--vsock-listen" {
+        let port: u32 = args[2].parse().unwrap_or(5005);
+        vsock::listen(port);
+    }
+
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     // Announce readiness on the console (stderr), NOT stdout — stdout is the
@@ -342,5 +353,64 @@ mod pty {
     }
     pub fn bridge(_s: Session) -> i32 {
         1
+    }
+}
+
+/// AF_VSOCK listener for custom images (no socat in arbitrary userlands).
+#[cfg(target_os = "linux")]
+mod vsock {
+    use std::os::unix::io::FromRawFd;
+    use std::process::{Command, Stdio};
+
+    pub fn listen(port: u32) -> ! {
+        unsafe {
+            let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
+            if fd < 0 {
+                eprintln!("vsock socket failed: {}", std::io::Error::last_os_error());
+                std::process::exit(1);
+            }
+            let mut addr: libc::sockaddr_vm = std::mem::zeroed();
+            addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+            addr.svm_port = port;
+            addr.svm_cid = libc::VMADDR_CID_ANY;
+            let rc = libc::bind(
+                fd,
+                &addr as *const libc::sockaddr_vm as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
+            );
+            if rc != 0 || libc::listen(fd, 16) != 0 {
+                eprintln!("vsock bind/listen failed: {}", std::io::Error::last_os_error());
+                std::process::exit(1);
+            }
+            eprintln!("{}", serde_json::json!({"event": "agent_vsock_listening", "port": port}));
+            loop {
+                let conn = libc::accept(fd, std::ptr::null_mut(), std::ptr::null_mut());
+                if conn < 0 {
+                    continue;
+                }
+                // One agent process per connection, exactly like the socat
+                // bridge: the child runs the normal stdio loop (and can take
+                // the connection over for a PTY session).
+                let spawned = Command::new("/proc/self/exe")
+                    .stdin(Stdio::from_raw_fd(libc::dup(conn)))
+                    .stdout(Stdio::from_raw_fd(libc::dup(conn)))
+                    .stderr(Stdio::inherit())
+                    .spawn();
+                libc::close(conn);
+                if let Err(e) = spawned {
+                    eprintln!("vsock: spawn per-connection agent failed: {e}");
+                }
+                // Reap any finished children so they don't accumulate as zombies.
+                while libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) > 0 {}
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod vsock {
+    pub fn listen(_port: u32) -> ! {
+        eprintln!("--vsock-listen is only supported on Linux guests");
+        std::process::exit(1);
     }
 }
