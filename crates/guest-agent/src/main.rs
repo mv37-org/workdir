@@ -296,7 +296,11 @@ mod pty {
         let pid = session.child.id() as libc::pid_t;
         let mut master_write = session.master_write;
         std::thread::spawn(move || {
-            let mut stdin = std::io::stdin();
+            // Read the connection via a dup of fd 0, NOT std::io::stdin(): the
+            // main loop's `lines()` iterator still holds the global stdin lock
+            // while we bridge, so locking Stdin here would deadlock keystrokes
+            // (validated on the node: prompt out, input dead).
+            let mut stdin = unsafe { std::fs::File::from_raw_fd(libc::dup(0)) };
             let mut buf = [0u8; 4096];
             loop {
                 match stdin.read(&mut buf) {
