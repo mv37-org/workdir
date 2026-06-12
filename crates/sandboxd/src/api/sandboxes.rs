@@ -227,7 +227,7 @@ pub async fn browser_screenshot(
     let shot = "/tmp/wd-screenshot.png";
     let cmd = format!("rm -f {shot}; DISPLAY=:0 import -window root {shot} 2>/dev/null; test -s {shot}");
     if let Err(e) = node
-        .exec(&handle, &ExecRequest { cmd, cwd: None, env: None, background: false })
+        .exec(&handle, &ExecRequest { cmd, cwd: None, env: Default::default(), background: false })
         .await
     {
         return (StatusCode::BAD_GATEWAY, format!("capture exec failed: {e}")).into_response();
