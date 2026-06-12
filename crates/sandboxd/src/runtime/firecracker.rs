@@ -189,6 +189,8 @@ pub struct FirecrackerRuntime {
     /// Share one read-only base rootfs across VMs instead of a per-VM COW copy
     /// (Phase 3 density); the guest layers a tmpfs+overlayfs on top.
     shared_rootfs: bool,
+    /// Backing images for persistent volumes (Phase 5); attached as extra drives.
+    volumes_dir: PathBuf,
     /// Launch Firecracker with `--no-seccomp` (see config docs); needed for
     /// snapshot/create under the jailer on some kernels (firecracker#1088).
     no_seccomp: bool,
@@ -215,6 +217,7 @@ impl FirecrackerRuntime {
             prewarm_mem_cache: cfg.prewarm_mem_cache,
             cpu_template: cfg.cpu_template.clone(),
             shared_rootfs: cfg.shared_rootfs,
+            volumes_dir: cfg.volumes_dir.clone(),
             no_seccomp: cfg.firecracker_no_seccomp,
             next_cid: AtomicU32::new(3), // CIDs 0-2 are reserved
             next_tap: AtomicU32::new(0),
@@ -586,6 +589,34 @@ impl FirecrackerRuntime {
                     "is_root_device": true,
                     "is_read_only": self.shared_for(spec),
                 })).await?;
+                // Persistent volumes (Phase 5): stage each backing image into the
+                // chroot (hardlink → writes hit the real file; chown to the jailed
+                // uid) and attach it as an extra writable drive. The guest mounts
+                // them by ext4 LABEL in `apply_features`. Volumes force cold boot,
+                // so this fresh-boot path is the only place they're configured.
+                for (i, va) in spec.volumes.iter().enumerate() {
+                    let drive_id = format!("vol{i}");
+                    let backing = self.volumes_dir.join(format!("{}.ext4", va.volume_id));
+                    let path_on_host = if self.use_jailer {
+                        let chroot_root = api_sock.parent().context("api_sock has no parent")?;
+                        let dst = chroot_root.join(format!("{}.ext4", va.volume_id));
+                        let _ = std::fs::remove_file(&dst);
+                        std::fs::hard_link(&backing, &dst)
+                            .with_context(|| format!("stage volume {} (allocated?)", va.volume_id))?;
+                        let uid = self.jailer_uid_base + tap_idx;
+                        let _ = tokio::process::Command::new("chown")
+                            .arg(format!("{uid}:{uid}")).arg(&dst).status().await;
+                        format!("{}.ext4", va.volume_id)
+                    } else {
+                        backing.to_string_lossy().into_owned()
+                    };
+                    self.fc_api(&api_sock, "PUT", &format!("/drives/{drive_id}"), &json!({
+                        "drive_id": drive_id,
+                        "path_on_host": path_on_host,
+                        "is_root_device": false,
+                        "is_read_only": false,
+                    })).await?;
+                }
                 self.fc_api(&api_sock, "PUT", "/network-interfaces/eth0", &json!({
                     "iface_id": "eth0",
                     "host_dev_name": tap,
@@ -708,6 +739,22 @@ impl FirecrackerRuntime {
                 .agent_call(handle, &json!({
                     "op": "exec",
                     "cmd": format!("mkdir -p {}; {}{}", shell_quote(&m.mount_path), env_exports, args),
+                    "background": false,
+                }))
+                .await;
+        }
+
+        // Persistent volumes: mount each attached block device by its ext4 LABEL
+        // (assigned at volume-create), so the guest /dev/vdX ordering doesn't
+        // matter. The fs already exists, so this is just mkdir + mount; data from
+        // a prior attachment comes back intact.
+        for va in &spec.volumes {
+            let label = crate::ids::volume_label(&va.volume_id);
+            let p = shell_quote(&va.mount_path);
+            let _ = self
+                .agent_call(handle, &json!({
+                    "op": "exec",
+                    "cmd": format!("mkdir -p {p} && mount LABEL={label} {p}"),
                     "background": false,
                 }))
                 .await;

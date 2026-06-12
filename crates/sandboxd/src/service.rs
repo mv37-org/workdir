@@ -88,6 +88,10 @@ pub async fn create_sandbox(
     let files = build_ephemeral_files(req.files.as_deref())?;
     let mounts = req.mounts.clone().unwrap_or_default();
     validate_mounts(&mounts)?;
+    // Persistent volumes: validate the attach shapes now; reserve them against the
+    // store inside the admission section (below) so concurrent creates cannot both
+    // claim the same volume.
+    let volumes = parse_volume_attaches(req.volumes.as_deref())?;
     let docker = req.docker.as_ref().map(|d| d.enabled).unwrap_or(false);
     if docker && matches!(class, ImageClass::Base) {
         // The base image deliberately excludes the Docker daemon (spec §10.2).
@@ -160,6 +164,7 @@ pub async fn create_sandbox(
         docker,
         coding_agent: coding_agent.clone(),
         mounts: mounts.clone(),
+        volumes: volumes.clone(),
         files,
     };
 
@@ -182,6 +187,7 @@ pub async fn create_sandbox(
         docker,
         coding_agent: coding_agent_kind,
         mounts,
+        volumes: volumes.clone(),
         ports: vec![],
         runtime_handle: None,
         error: None,
@@ -190,6 +196,15 @@ pub async fn create_sandbox(
         last_active_at: now,
     };
     state.store.put_sandbox(&sb).map_err(ApiError::Internal)?;
+    // Reserve the volumes to THIS sandbox while still holding the admission lock,
+    // so two concurrent creates cannot both attach the same volume.
+    if let Err(e) = reserve_volumes(state, &ctx.org_id, &sandbox_id, &volumes) {
+        sb.state = State::Failed;
+        sb.error = Some(e.to_string());
+        sb.updated_at = Utc::now();
+        state.store.put_sandbox(&sb).ok();
+        return Err(e);
+    }
     // Capacity is now reserved (the `creating` row counts against admission);
     // release the lock so other creates proceed concurrently with this boot.
     drop(admission_guard);
@@ -204,6 +219,7 @@ pub async fn create_sandbox(
             sb.error = Some(format!("boot failed: {e}"));
             sb.updated_at = Utc::now();
             state.store.put_sandbox(&sb).ok();
+            release_volumes(state, &volumes); // unreserve so they can attach elsewhere
             return Err(ApiError::Internal(e));
         }
     };
@@ -434,6 +450,86 @@ fn validate_mounts(mounts: &[MountSpec]) -> ApiResult<()> {
         }
     }
     Ok(())
+}
+
+/// Validate the *shape* of volume attachments (absolute, distinct mount paths;
+/// at most a handful per VM). Store-level checks happen in [`reserve_volumes`].
+fn parse_volume_attaches(reqs: Option<&[VolumeAttachRequest]>) -> ApiResult<Vec<VolumeAttach>> {
+    let reqs = reqs.unwrap_or(&[]);
+    if reqs.len() > 8 {
+        return Err(ApiError::BadRequest("at most 8 volumes per sandbox".into()));
+    }
+    let mut out = Vec::with_capacity(reqs.len());
+    let mut seen_paths = std::collections::BTreeSet::new();
+    let mut seen_vols = std::collections::BTreeSet::new();
+    for r in reqs {
+        if !r.mount_path.starts_with('/') {
+            return Err(ApiError::BadRequest(format!("volume mount_path '{}' must be absolute", r.mount_path)));
+        }
+        if !seen_paths.insert(r.mount_path.clone()) {
+            return Err(ApiError::BadRequest(format!("duplicate volume mount_path '{}'", r.mount_path)));
+        }
+        if !seen_vols.insert(r.volume_id.clone()) {
+            return Err(ApiError::BadRequest(format!("volume '{}' attached twice", r.volume_id)));
+        }
+        out.push(VolumeAttach { volume_id: r.volume_id.clone(), mount_path: r.mount_path.clone() });
+    }
+    Ok(out)
+}
+
+/// Mark each volume as attached to `sandbox_id` (must be org-owned and free).
+/// Called under the admission lock so the check-and-set is race-free.
+fn reserve_volumes(
+    state: &AppState,
+    org_id: &str,
+    sandbox_id: &str,
+    volumes: &[VolumeAttach],
+) -> ApiResult<()> {
+    let mut reserved: Vec<Volume> = Vec::new();
+    for va in volumes {
+        let mut v = match state.store.get_volume(&va.volume_id).map_err(ApiError::Internal)? {
+            Some(v) if v.org_id == org_id => v,
+            _ => {
+                roll_back_reservations(state, &reserved);
+                return Err(ApiError::NotFound(format!("volume {}", va.volume_id)));
+            }
+        };
+        if let Some(other) = &v.attached_to {
+            if other != sandbox_id {
+                roll_back_reservations(state, &reserved);
+                return Err(ApiError::Conflict(format!(
+                    "volume {} is already attached to sandbox {other}",
+                    va.volume_id
+                )));
+            }
+        }
+        v.attached_to = Some(sandbox_id.to_string());
+        v.updated_at = Utc::now();
+        state.store.put_volume(&v).map_err(ApiError::Internal)?;
+        reserved.push(v);
+    }
+    Ok(())
+}
+
+fn roll_back_reservations(state: &AppState, reserved: &[Volume]) {
+    for v in reserved {
+        let mut v = v.clone();
+        v.attached_to = None;
+        v.updated_at = Utc::now();
+        let _ = state.store.put_volume(&v);
+    }
+}
+
+/// Detach the given volumes (clear `attached_to`). Used on boot failure and on
+/// sandbox deletion — the backing image is left intact so the data persists.
+fn release_volumes(state: &AppState, volumes: &[VolumeAttach]) {
+    for va in volumes {
+        if let Ok(Some(mut v)) = state.store.get_volume(&va.volume_id) {
+            v.attached_to = None;
+            v.updated_at = Utc::now();
+            let _ = state.store.put_volume(&v);
+        }
+    }
 }
 
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
@@ -705,6 +801,9 @@ pub async fn delete_sandbox(state: &AppState, sb: Sandbox) -> ApiResult<()> {
             tracing::warn!(sandbox = %deleting.id, error = %e, "runtime delete failed; marking deleted anyway");
         }
     }
+    // Detach persistent volumes: the sandbox is gone but the backing images stay,
+    // so the data survives and the volumes can be re-attached elsewhere.
+    release_volumes(state, &deleting.volumes);
     state
         .store
         .cas_sandbox(&deleting.id, &[State::Deleting], |s| {
@@ -820,6 +919,7 @@ pub async fn fork_sandbox(state: &AppState, ctx: &AuthContext, parent: Sandbox) 
         docker: parent.docker,
         coding_agent: None,
         mounts: parent.mounts.clone(),
+        volumes: vec![], // a fork sibling never shares the parent's exclusive volumes
         files: vec![],
     };
 
@@ -841,6 +941,7 @@ pub async fn fork_sandbox(state: &AppState, ctx: &AuthContext, parent: Sandbox) 
         docker: parent.docker,
         coding_agent: parent.coding_agent.clone(),
         mounts: parent.mounts.clone(),
+        volumes: vec![],
         ports: vec![],
         runtime_handle: None,
         error: None,

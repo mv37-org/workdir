@@ -40,6 +40,9 @@ pub struct VmSpec {
     pub coding_agent: Option<CodingAgentConfig>,
     /// Bucket mounts to set up after boot.
     pub mounts: Vec<MountSpec>,
+    /// Persistent volumes to attach as block devices and mount in the guest.
+    #[serde(default)]
+    pub volumes: Vec<crate::model::VolumeAttach>,
     /// Inline files to write into the workspace before startup commands run.
     pub files: Vec<(String, Vec<u8>)>,
 }

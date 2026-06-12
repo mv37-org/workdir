@@ -104,6 +104,7 @@ impl LocalNode {
                 docker: false,
                 coding_agent: None,
                 mounts: Vec::new(),
+                volumes: Vec::new(),
                 files: Vec::new(),
             };
             match self.runtime.prewarm(&spec).await {
@@ -136,13 +137,17 @@ impl NodeClient for LocalNode {
 
     async fn place(&self, spec: &VmSpec, snapshot_available: bool) -> Result<VmInstance> {
         let key = ShapeKey::new(&spec.image_key, &spec.resources);
-        let warm = {
+        // A hot-pool VM booted without this sandbox's volume drives, so a sandbox
+        // that attaches volumes must cold-boot (drives are configured pre-boot).
+        let warm = if spec.volumes.is_empty() {
             let mut pools = self.hotpools.lock().await;
             pools.claim(&key).map(|handle| WarmVm {
                 handle,
                 image_key: spec.image_key.clone(),
                 resources: spec.resources,
             })
+        } else {
+            None
         };
         self.runtime.create(spec, warm, snapshot_available).await
     }

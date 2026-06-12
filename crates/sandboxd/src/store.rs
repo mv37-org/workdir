@@ -82,6 +82,14 @@ CREATE TABLE IF NOT EXISTS benchmarks (
     data       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_benchmarks_path ON benchmarks(image, boot_path);
+CREATE TABLE IF NOT EXISTS volumes (
+    id         TEXT PRIMARY KEY,
+    org_id     TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    data       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_volumes_org ON volumes(org_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_volumes_org_name ON volumes(org_id, name);
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -544,6 +552,55 @@ impl Store {
         Ok(n > 0)
     }
 
+    // --- persistent volumes (Phase 5) -----------------------------------
+
+    pub fn put_volume(&self, v: &crate::model::Volume) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO volumes(id, org_id, name, data) VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data, name = excluded.name",
+            params![v.id, v.org_id, v.name, serde_json::to_string(v)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_volume(&self, id: &str) -> Result<Option<crate::model::Volume>> {
+        let conn = self.lock();
+        let row: Option<String> = conn
+            .query_row("SELECT data FROM volumes WHERE id = ?1", params![id], |r| r.get(0))
+            .optional()?;
+        Ok(row.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
+    pub fn get_volume_by_name(&self, org_id: &str, name: &str) -> Result<Option<crate::model::Volume>> {
+        let conn = self.lock();
+        let row: Option<String> = conn
+            .query_row(
+                "SELECT data FROM volumes WHERE org_id = ?1 AND name = ?2",
+                params![org_id, name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(row.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
+    pub fn list_volumes_for_org(&self, org_id: &str) -> Result<Vec<crate::model::Volume>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT data FROM volumes WHERE org_id = ?1 ORDER BY name")?;
+        let rows = stmt.query_map(params![org_id], |r| r.get::<_, String>(0))?;
+        let mut out = vec![];
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
+    }
+
+    pub fn delete_volume(&self, id: &str) -> Result<bool> {
+        let conn = self.lock();
+        let n = conn.execute("DELETE FROM volumes WHERE id = ?1", params![id])?;
+        Ok(n > 0)
+    }
+
     // --- benchmark samples (roadmap Phase 0) ----------------------------
 
     pub fn put_benchmark_sample(&self, s: &crate::bench::BenchmarkSample) -> Result<()> {
@@ -613,4 +670,56 @@ pub fn active_memory_gb(sandboxes: &[Sandbox]) -> f64 {
 /// Helper: does this sandbox count as active?
 pub fn is_state_active(state: State) -> bool {
     state.is_active()
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+    use crate::model::Volume;
+    use chrono::Utc;
+
+    fn vol(id: &str, org: &str, name: &str) -> Volume {
+        let now = Utc::now();
+        Volume {
+            id: id.into(),
+            org_id: org.into(),
+            name: name.into(),
+            size_gb: 10,
+            attached_to: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn volume_crud_and_org_scope() {
+        let s = Store::open_in_memory().unwrap();
+        s.put_volume(&vol("vol_a", "org1", "data")).unwrap();
+        s.put_volume(&vol("vol_b", "org1", "cache")).unwrap();
+        s.put_volume(&vol("vol_c", "org2", "data")).unwrap();
+
+        // org-scoped list + by-name lookup
+        assert_eq!(s.list_volumes_for_org("org1").unwrap().len(), 2);
+        assert_eq!(s.list_volumes_for_org("org2").unwrap().len(), 1);
+        assert_eq!(s.get_volume_by_name("org1", "cache").unwrap().unwrap().id, "vol_b");
+        assert!(s.get_volume_by_name("org2", "cache").unwrap().is_none());
+
+        // attach reservation round-trips through the JSON blob
+        let mut v = s.get_volume("vol_a").unwrap().unwrap();
+        v.attached_to = Some("sbx_1".into());
+        s.put_volume(&v).unwrap();
+        assert_eq!(s.get_volume("vol_a").unwrap().unwrap().attached_to.as_deref(), Some("sbx_1"));
+
+        // delete frees the slot
+        assert!(s.delete_volume("vol_a").unwrap());
+        assert!(!s.delete_volume("vol_a").unwrap());
+        assert_eq!(s.list_volumes_for_org("org1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn volume_label_fits_ext4() {
+        let l = crate::ids::volume_label("vol_a1b2c3d4e5f6");
+        assert!(l.starts_with("wdv"));
+        assert!(l.len() <= 16, "ext4 labels are capped at 16 bytes, got {}", l.len());
+    }
 }
