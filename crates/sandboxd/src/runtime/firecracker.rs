@@ -189,6 +189,9 @@ pub struct FirecrackerRuntime {
     no_seccomp: bool,
     next_cid: AtomicU32,
     next_tap: AtomicU32,
+    /// Monotonic suffix for restore jail ids (the jailer refuses an existing
+    /// chroot, so each restore gets a fresh one).
+    next_restore: AtomicU32,
     vms: Mutex<HashMap<String, VmRecord>>,
 }
 
@@ -210,6 +213,7 @@ impl FirecrackerRuntime {
             no_seccomp: cfg.firecracker_no_seccomp,
             next_cid: AtomicU32::new(3), // CIDs 0-2 are reserved
             next_tap: AtomicU32::new(0),
+            next_restore: AtomicU32::new(0),
             vms: Mutex::new(HashMap::new()),
         }
     }
@@ -991,16 +995,81 @@ impl Runtime for FirecrackerRuntime {
             }
         }
 
-        // Relaunch Firecracker against the same control socket.
-        //
-        // NOTE: this relaunch is a direct (unchrooted) Firecracker process, so it
-        // is handed ABSOLUTE host paths (api sock, vsock uds, snapshot, mem) —
-        // they land exactly where the host expects. Re-entering the jailer chroot
-        // on restore is a follow-up; the microVM is still the isolation boundary,
-        // so this is a defense-in-depth reduction (logged), not a VM-escape.
+        // Jailer restore: relaunch under the jailer in a FRESH chroot (the jailer
+        // refuses an existing chroot dir, so the original can't be reused). The
+        // snapshot artifacts are HARDLINKED into the new chroot — same inode, no
+        // multi-GB copy, and same owner uid as the new (dropped) Firecracker, so
+        // it can read them. Paths are chroot-relative.
         if self.use_jailer {
-            tracing::warn!(handle, "restore relaunches Firecracker unjailed (jailer-restore pending)");
+            let n = self.next_restore.fetch_add(1, Ordering::SeqCst);
+            let jail_id = format!("{}-r{}", handle.replace('_', "-"), n);
+            let uid = self.jailer_uid_base + tap_idx.unwrap_or(0);
+            let new_chroot = self.chroot_base.join("firecracker").join(&jail_id).join("root");
+            let log = std::fs::File::create(jail.join("restore.log")).context("restore log")?;
+            let log2 = log.try_clone()?;
+            let pid = tokio::process::Command::new(&self.jailer_bin)
+                .args(["--id", &jail_id])
+                .args(["--exec-file", &self.firecracker_bin])
+                .args(["--uid", &uid.to_string(), "--gid", &uid.to_string()])
+                .args(["--chroot-base-dir", self.chroot_base.to_str().unwrap()])
+                .args(["--", "--api-sock", "api.sock"])
+                .args(self.no_seccomp.then_some("--no-seccomp"))
+                .stdout(log).stderr(log2)
+                .spawn().context("relaunch jailer for restore")?
+                .id();
+            for _ in 0..400 {
+                if new_chroot.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // Stage the snapshot artifacts into the new chroot (hardlink, instant).
+            let new_snap = new_chroot.join("snapshot.file");
+            let new_mem = new_chroot.join("mem.file");
+            let _ = std::fs::remove_file(&new_snap);
+            let _ = std::fs::remove_file(&new_mem);
+            std::fs::hard_link(jail.join("snapshot.file"), &new_snap)
+                .or_else(|_| std::fs::copy(jail.join("snapshot.file"), &new_snap).map(|_| ()))
+                .context("stage snapshot into restore chroot")?;
+            std::fs::hard_link(jail.join("mem.file"), &new_mem)
+                .or_else(|_| std::fs::copy(jail.join("mem.file"), &new_mem).map(|_| ()))
+                .context("stage mem into restore chroot")?;
+            let new_api = new_chroot.join("api.sock");
+            for _ in 0..400 {
+                if new_api.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            if self.prewarm_mem_cache {
+                prewarm_page_cache(&new_mem).await;
+            }
+            self.fc_api(&new_api, "PUT", "/vsock", &json!({
+                "guest_cid": cid, "uds_path": "vsock.sock",
+            })).await?;
+            self.fc_api_to(&new_api, "PUT", "/snapshot/load", &json!({
+                "snapshot_path": "snapshot.file",
+                "mem_backend": { "backend_path": "mem.file", "backend_type": "File" },
+                "resume_vm": true,
+            }), 300).await?;
+            if let Some(v) = self.vms.lock().unwrap().get_mut(handle) {
+                v.api_sock = new_api;
+                v.vsock_uds = new_chroot.join("vsock.sock");
+                v.vsock_fc = "vsock.sock".to_string();
+                v.pid = pid;
+                v.standby = false;
+                if let Some(idx) = tap_idx {
+                    v.guest_ip = Some(guest_ip(idx));
+                }
+            }
+            self.persist_record(handle);
+            self.await_agent(handle, Duration::from_secs(15)).await?;
+            return Ok(start.elapsed().as_millis() as u64);
         }
+
+        // Direct (non-jailer) restore: relaunch an unchrooted Firecracker with
+        // ABSOLUTE host paths so the api sock / vsock uds / snapshot / mem land
+        // exactly where the host expects.
         let _ = std::fs::remove_file(&api_sock);
         let _ = std::fs::remove_file(&vsock_uds); // clear the evicted run's stale socket
         let log = std::fs::File::create(jail.join("restore.log")).context("restore log")?;
@@ -1208,6 +1277,10 @@ impl Runtime for FirecrackerRuntime {
 
     async fn delete(&self, handle: &str) -> Result<()> {
         let record = self.vms.lock().unwrap().remove(handle);
+        // The active chroot may be a `-rN` restore chroot, not the original
+        // handle-derived one; clean whatever the record's api sock points at
+        // (chroot_base/firecracker/<id>) so restores don't leak chroots.
+        let mut active_chroot: Option<PathBuf> = None;
         if let Some(r) = record {
             if let Some(pid) = r.pid {
                 // SIGKILL Firecracker; it tears the VM down with it.
@@ -1216,12 +1289,18 @@ impl Runtime for FirecrackerRuntime {
             if let Some(tap) = r.tap {
                 let _ = run_ip(&["link", "del", &tap]).await;
             }
+            // api_sock = <chroot_base>/firecracker/<id>/root/api.sock → remove the
+            // <id> directory.
+            active_chroot = r.api_sock.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
             let _ = r.image_key; // (kept for future per-image teardown hooks)
         }
         self.workspaces.remove(handle).ok();
         let _ = std::fs::remove_dir_all(self.chroot_base.join(handle));
         if self.use_jailer {
             let _ = std::fs::remove_dir_all(self.jailer_chroot(handle));
+            if let Some(c) = active_chroot {
+                let _ = std::fs::remove_dir_all(c);
+            }
         }
         Ok(())
     }
