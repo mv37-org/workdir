@@ -18,14 +18,21 @@ chmod 600 /etc/workdir/backup.env
 
 echo "==> installing litestream + restic"
 command -v restic >/dev/null 2>&1 || apt-get install -y -qq restic >/dev/null
+# Pin Litestream to the 0.3.x line: 0.5.x rewrote the config schema and our
+# litestream.yml is the documented 0.3.x format. The .deb installs to
+# /usr/bin; symlink into /usr/local/bin so the systemd unit's path resolves
+# regardless of install method.
+LITESTREAM_VER=v0.3.13
 if ! command -v litestream >/dev/null 2>&1; then
   arch=$(dpkg --print-architecture)  # amd64/arm64
-  ver=$(curl -fsSL https://api.github.com/repos/benbjohnson/litestream/releases/latest | grep -oP '"tag_name": "\Kv[^"]+')
   tmp=$(mktemp -d)
-  curl -fsSL "https://github.com/benbjohnson/litestream/releases/download/${ver}/litestream-${ver}-linux-${arch}.tar.gz" | tar -xz -C "$tmp"
-  install -m755 "$tmp/litestream" /usr/local/bin/litestream
+  curl -fsSL -o "$tmp/litestream.deb" \
+    "https://github.com/benbjohnson/litestream/releases/download/${LITESTREAM_VER}/litestream-${LITESTREAM_VER}-linux-${arch}.deb"
+  dpkg -i "$tmp/litestream.deb" >/dev/null
   rm -rf "$tmp"
 fi
+ln -sf "$(command -v litestream)" /usr/local/bin/litestream
+# The .deb ships its own empty sample /etc/litestream.yml — ours overwrites it below.
 echo "    litestream $(litestream version 2>/dev/null || echo '?'), restic $(restic version 2>/dev/null | head -1)"
 
 echo "==> installing configs + units"
