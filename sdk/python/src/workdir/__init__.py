@@ -43,6 +43,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Optional
 
+__version__ = "0.1.1"
 __all__ = ["Client", "ExecResult", "Sandbox", "SandboxError"]
 
 
@@ -73,6 +74,7 @@ class _Http:
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Authorization", f"Bearer {self.key}")
         req.add_header("Content-Type", "application/json")
+        req.add_header("User-Agent", f"mv37-workdir-python/{__version__}")
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read()
