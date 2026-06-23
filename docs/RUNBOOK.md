@@ -76,9 +76,10 @@ the kernel cmdline (`wd.ip`/`wd.gw`/`wd.dns` injected by the daemon), writes
 `/etc/resolv.conf`, then `exec socat VSOCK-LISTEN:5005 ... EXEC:sandbox-guest-agent`.
 
 - **base / node-python**: Python 3.12 + pip + venv, Node 18 + npm, git, build-essential, curl/wget.
-- **browser** (TODO): + Chromium, Playwright, Xvfb, x11vnc, noVNC. Not built yet —
-  the warmer skips it (`Runtime::image_available`), so browser sandboxes are
-  unavailable until this image exists.
+- **browser**: Chromium, Playwright, Xvfb, x11vnc, noVNC, and CDP. The
+  Dockerfile/init are tracked under `deploy/images/browser/`, but browser
+  sandboxes are unavailable until `/var/lib/workdir/images/browser/rootfs.ext4`
+  exists on the node.
 
 ---
 

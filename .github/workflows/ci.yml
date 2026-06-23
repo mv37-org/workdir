@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Check RustSec advisories
+        run: cargo audit
+
+  sdks:
+    name: SDK Packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Build TypeScript SDK
+        working-directory: sdk/typescript
+        run: |
+          npm ci
+          npm run build
+          npm pack --dry-run
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Build Python SDK
+        working-directory: sdk/python
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+          python -m pip install dist/*.whl
+          python - <<'PY'
+          import workdir
+          print(workdir.__all__)
+          PY
+
+  source-hygiene:
+    name: Source Hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Scan for credential-shaped strings
+        run: |
+          set -euo pipefail
+          if git grep -n -I -E 'BEGIN (RSA|DSA|EC|OPENSSH|PRIVATE) KEY|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|pypi-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{35}' -- .; then
+            echo "::error::Potential credential-like string found in tracked files."
+            exit 1
+          fi
+
+      - name: Check source archive contents
+        run: |
+          set -euo pipefail
+          git archive --format=tar HEAD > /tmp/workdir-source.tar
+          tar -tf /tmp/workdir-source.tar > /tmp/workdir-source-files.txt
+          if grep -E '(^|/)(target|node_modules|dist|\.venv|venv|__pycache__|\.pytest_cache|\.claude)(/|$)|(^|/)\.env([^/]*$|/)|(^|/)(secret\.key|admin-key\.txt)$|(^|/).*\.(db|sqlite)$' /tmp/workdir-source-files.txt; then
+            echo "::error::Source archive includes local runtime, build, cache, or secret material."
+            exit 1
+          fi

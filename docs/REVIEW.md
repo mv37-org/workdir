@@ -44,7 +44,7 @@ These are real but lower-severity or larger-scope; tracked for a follow-up.
 | H4 | No rate limiting on auth failures. | Add failed-auth rate limiting + audit, especially on the preview path. |
 | M1 | systemd grants `CAP_SYS_ADMIN`+`CAP_DAC_OVERRIDE` to the whole control-plane process. | Split privileges: unprivileged API process + a minimal jailer/network helper. |
 | M2 | nftables `input` chain is a no-op (`policy accept`), no IPv6 rules, and the installer's embedded copy diverges from the repo file. | `policy drop` + explicit accepts, IPv6 rules, single source of truth. |
-| M4 | Custom-image build pipeline does not actually scan (it's a mock). | Implement real capability scan + secret scrub + `context_url`/`image_ref` SSRF validation before publishing. |
+| M4 | Custom-image builds materialize real Firecracker rootfs artifacts on Firecracker nodes, but the advertised capability scan/secret scrub is not yet an enforcing validation step. | Add enforced capability scanning, secret scrubbing, and `context_url`/`image_ref` SSRF validation before treating custom images as safe for untrusted tenants. |
 | L1 | Workspace jail is lexical (symlink-unsafe for the dev runtime file API). | `canonicalize` the resolved parent / open with `O_NOFOLLOW`. |
 
 ## Verified positives

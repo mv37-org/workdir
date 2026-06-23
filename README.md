@@ -7,6 +7,7 @@
 Every sandbox is a [Firecracker](https://firecracker-microvm.github.io/) microVM that boots in tens of milliseconds. One small binary gives you the API, scheduler, billing, and host agent — self-host it on a single server, or use the managed cloud at [workdir.dev](https://workdir.dev).
 
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![CI](https://github.com/mv37-org/workdir/actions/workflows/ci.yml/badge.svg)](https://github.com/mv37-org/workdir/actions/workflows/ci.yml)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![Cloud](https://img.shields.io/badge/cloud-workdir.dev-black.svg)](https://workdir.dev)
 [![npm](https://img.shields.io/npm/v/%40mv37%2Fworkdir?label=npm)](https://www.npmjs.com/package/@mv37/workdir)
@@ -51,7 +52,7 @@ curl -fsSL https://workdir.dev/install.sh | sudo bash -s -- \
   --role all-in-one --domain sandboxes.example.com
 ```
 
-The installer runs preflight checks (and fails clearly if `/dev/kvm` is missing), installs Firecracker + the systemd service + firewall rules, and prints your admin key once. Full guide: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
+The installer runs preflight checks (and fails clearly if `/dev/kvm` is missing), installs Firecracker + the systemd service + firewall rules, and prints your admin key once. Operators still need to build or stage the guest kernel/rootfs artifacts for the image families they want to run. Full guide: **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
 ### Run it locally (no KVM, any OS)
 
@@ -100,10 +101,10 @@ console.log(box.urls.ports["3000"]);   // public preview URL, served through an 
 
 ### More capabilities
 
-- **Browser automation** — `image: "browser"` gives you Chromium + Playwright with noVNC and CDP URLs.
+- **Browser automation** — `image: "browser"` gives you Chromium + Playwright with noVNC and CDP URLs once the browser rootfs is built on the node.
 - **Secrets** — store org secrets (encrypted at rest, AES-256-GCM), reference them by name; they're injected at runtime and never land in a snapshot.
-- **Docker-in-Docker** — `docker: { enabled: true }` runs `dockerd` *inside* the microVM (never the host socket).
-- **S3 mounts** — mount a bucket into the sandbox via `mountpoint-s3`.
+- **Docker-in-Docker** — `docker: { enabled: true }` runs `dockerd` *inside* a docker-capable microVM image (never the host socket).
+- **S3 mounts** — mount a bucket into the sandbox via `mountpoint-s3` when the guest image includes the mount helper.
 - **Ephemeral files & images** — drop inline files into a sandbox at boot, or build throwaway images that auto-expire.
 
 Full reference: **[docs/FEATURES.md](docs/FEATURES.md)** and **[docs/API.md](docs/API.md)**.
@@ -140,11 +141,11 @@ The control plane is platform-independent and talks to the data plane through a 
 
 ## Status
 
-Production-ready control plane (API, scheduler, pricing, lifecycle, hot pools, secrets, preview proxy) with full test coverage. The Firecracker data plane runs real microVMs on a KVM host; building the curated guest images (kernel + rootfs with the agent baked in) is the one piece you supply per fleet — see [docs/FEATURES.md](docs/FEATURES.md). Internally the crate is named `sandboxd`; the shipped binary and CLI are `workdir`.
+The control plane, SDKs, mock runtime, scheduler, lifecycle, billing, secrets, preview proxy, and Firecracker runtime are implemented and covered by the test suite. Self-hosted production use requires a KVM Linux host plus built/staged guest kernel and rootfs artifacts for the image families you enable. Before exposing a public multi-tenant deployment, review the deferred hardening items in [docs/REVIEW.md](docs/REVIEW.md). Internally the crate is named `sandboxd`; the shipped binary and CLI are `workdir`.
 
 ## Contributing
 
-Issues and PRs welcome. `cargo test` runs the unit + integration suite; `cargo clippy` should stay clean. By contributing you agree your contributions are licensed under the AGPL-3.0 (and may be offered under workdir's commercial license).
+Issues and PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and contribution expectations. Report security issues privately via [SECURITY.md](SECURITY.md).
 
 ## License
 

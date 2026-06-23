@@ -85,8 +85,8 @@ The installer (`deploy/install.sh`) performs the spec §7.3 sequence:
 4. Installs and enables the host-agent systemd unit.
 5. Configures cgroups v2 and nftables/NAT (`deploy/nftables/sandbox-nat.nft`).
 6. Installs the preview/VNC proxy (part of the `sandboxd` binary).
-7. Writes `/etc/workdir/config.toml`, downloads curated image metadata.
-8. Runs a validation sandbox and reports capacity.
+7. Writes `/etc/workdir/config.toml`.
+8. Runs `workdir doctor` and reports host capacity.
 
 The admin API key is printed **once** to the journal:
 
@@ -117,6 +117,23 @@ workdir doctor --config /etc/workdir/config.toml
 curl -s http://127.0.0.1:8080/healthz
 ```
 
+### Stage guest artifacts
+
+The installer does not bundle kernel or rootfs artifacts. Before scheduling real
+Firecracker sandboxes, stage a guest kernel and build the curated images you
+want available:
+
+```bash
+cargo build --release -p guest-agent
+sudo bash deploy/build-image.sh base
+sudo bash deploy/build-image.sh browser 8G   # optional browser image
+sudo systemctl restart workdir
+```
+
+The fuller `deploy/provision-node.sh` path performs kernel download, base image
+build, and node setup from a repo checkout. See [docs/RUNBOOK.md](RUNBOOK.md)
+for the day-2 image build and rebuild flow.
+
 ---
 
 ## 4. Add a node (spec §8, §24.1)
@@ -136,15 +153,16 @@ monthly cost.
        --role worker \
        --control-plane https://api.sandboxes.example.com \
        --join-token <token>
-5. Wait for preflight validation + base image sync.
-6. Confirm the hot pool is ready.
-7. Mark the node schedulable.
+5. Wait for preflight validation.
+6. Stage the same guest kernel/rootfs artifacts used by the control-plane node.
+7. Confirm the hot pool is ready.
+8. Mark the node schedulable.
 ```
 
 The node-join flow (spec §8) registers the node, verifies host capabilities,
-syncs curated image metadata, downloads the base image **first**, warms the base
-hot pool, then downloads node-python/browser images if configured, and finally
-starts accepting placements.
+and starts accepting placements after the operator has staged the required
+curated image artifacts. Automatic image distribution is not included in this
+repo yet.
 
 ### Control-plane location
 
@@ -236,7 +254,9 @@ Programmed by the installer + host agent:
   (`deploy/nftables/sandbox-nat.nft`).
 - No inbound public IP per sandbox — VNC/preview only via the authenticated proxy.
 - Secrets injected only after assignment, never baked into snapshots.
-- Custom images scanned + policy-checked before publication.
+- Custom image artifacts are built asynchronously and isolated at runtime; the
+  enforcing capability scan/policy-check path is still deferred. See
+  [docs/REVIEW.md](REVIEW.md).
 
 ---
 

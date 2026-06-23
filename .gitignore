@@ -73,6 +73,7 @@ sdk/typescript/*.js.map
 # Editors / OS
 # ---------------------------------------------------------------------------
 .DS_Store
+.claude/
 .idea/
 .vscode/
 *.swp
