@@ -230,7 +230,7 @@ or run `workdir gen-config`. Key fields:
 
 | Section | Field | Meaning |
 |---|---|---|
-| `server` | `bind`, `public_domain`, `public_https`, `public_port`, `data_dir` | listen address, wildcard preview URL settings, state dir |
+| `server` | `bind`, `public_domain`, `public_https`, `public_port`, `capacity_exhausted_message`, `data_dir` | listen address, wildcard preview URL settings, optional hosted-demo capacity copy, state dir |
 | `node` | `role`, `node_id`, `advertise_addr`, `total_memory_gb` | node identity and advertised capacity |
 | `node` | `control_plane_url`, `join_token`, `rpc_token` | worker join plus control-plane/worker RPC auth |
 | `runtime` | `kind` | `firecracker` (prod) or `mock` (dev) |
@@ -244,9 +244,10 @@ or run `workdir gen-config`. Key fields:
 | `auth` | `bootstrap_admin_key`, `bootstrap_org` | first-boot admin key |
 
 Environment overrides (handy for containers/tests): `WORKDIR_BIND`,
-`WORKDIR_DATA_DIR`, `WORKDIR_PUBLIC_DOMAIN`, `WORKDIR_RUNTIME`,
-`WORKDIR_ADMIN_KEY`, `WORKDIR_CONFIG`, `WORKDIR_RPC_TOKEN`,
-`WORKDIR_STANDBY`, `WORKDIR_FC_NO_SECCOMP`.
+`WORKDIR_DATA_DIR`, `WORKDIR_PUBLIC_DOMAIN`, `WORKDIR_PUBLIC_HTTPS`,
+`WORKDIR_PUBLIC_PORT`, `WORKDIR_CAPACITY_EXHAUSTED_MESSAGE`,
+`WORKDIR_RUNTIME`, `WORKDIR_ADMIN_KEY`, `WORKDIR_CONFIG`,
+`WORKDIR_RPC_TOKEN`, `WORKDIR_STANDBY`, `WORKDIR_FC_NO_SECCOMP`.
 
 ---
 

@@ -7,6 +7,7 @@ bind = "0.0.0.0:8080"
 public_domain = "sandboxes.example.com"
 public_https = true
 # public_port = 8080   # include in preview URLs when not behind 443/80 (e.g. a LAN)
+# capacity_exhausted_message = "Please self-host. This hosted endpoint is not for production; it is a capacity-limited demo running on a couple of EX44s."
 data_dir = "/var/lib/workdir"
 
 [node]

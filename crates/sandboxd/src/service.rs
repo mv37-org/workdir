@@ -22,6 +22,17 @@ use chrono::Utc;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+fn capacity_error_detail(state: &AppState, detail: String) -> String {
+    let extra = state.cfg.server.capacity_exhausted_message.trim();
+    if extra.is_empty() {
+        detail
+    } else if detail.trim().is_empty() {
+        extra.to_string()
+    } else {
+        format!("{}. {}", detail.trim_end_matches('.'), extra)
+    }
+}
+
 /// Validate, place, boot, and run the startup recipe for a new sandbox.
 pub async fn create_sandbox(
     state: &AppState,
@@ -147,7 +158,7 @@ pub async fn create_sandbox(
     let placement =
         scheduler::select(&placement_req, &snapshots).map_err(|r| ApiError::NoCapacity {
             reason: r.reason,
-            detail: r.detail,
+            detail: capacity_error_detail(state, r.detail),
         })?;
     // The chosen node's data-plane client: local if it's us, else a remote
     // worker driven over its /internal API (multi-node).
@@ -1040,7 +1051,7 @@ pub async fn fork_sandbox(
         .collect();
     scheduler::select(&placement_req, &here).map_err(|r| ApiError::NoCapacity {
         reason: r.reason,
-        detail: r.detail,
+        detail: capacity_error_detail(state, r.detail),
     })?;
 
     // --- build child spec + reserve a creating record -------------------

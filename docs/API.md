@@ -259,4 +259,5 @@ target discovery.
 `conflict` (409), `rejected` (422), `no_capacity` (503, with `reason`),
 `internal` (500). `no_capacity.reason` is one of `no_nodes`,
 `no_schedulable_nodes`, `no_browser_capable_node`, `memory_admission`,
-`no_fit`.
+`no_fit`. Hosted deployments may append operator-configured guidance to the
+human `message`, while the stable `code` and `reason` remain unchanged.

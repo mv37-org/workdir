@@ -31,6 +31,10 @@ pub struct ServerConfig {
     /// (443 for https, 80 for http). Set this when the service is reached on a
     /// non-standard port, e.g. on a LAN at :8080.
     pub public_port: Option<u16>,
+    /// Extra text appended to `no_capacity` API errors. Hosted demos can use
+    /// this to explain that callers should self-host for production; self-hosted
+    /// operators can leave it empty.
+    pub capacity_exhausted_message: String,
     /// Directory for the SQLite database and runtime state.
     pub data_dir: PathBuf,
 }
@@ -218,6 +222,7 @@ impl Default for ServerConfig {
             public_domain: "sandboxes.local".to_string(),
             public_https: true,
             public_port: None,
+            capacity_exhausted_message: String::new(),
             data_dir: PathBuf::from("/var/lib/workdir"),
         }
     }
@@ -317,6 +322,9 @@ impl Config {
         }
         if let Ok(v) = std::env::var("WORKDIR_PUBLIC_PORT") {
             cfg.server.public_port = v.parse().ok();
+        }
+        if let Ok(v) = std::env::var("WORKDIR_CAPACITY_EXHAUSTED_MESSAGE") {
+            cfg.server.capacity_exhausted_message = v;
         }
         if let Ok(v) = std::env::var("WORKDIR_RUNTIME") {
             cfg.runtime.kind = v;
