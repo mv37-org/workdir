@@ -107,8 +107,8 @@ impl HotPools {
     /// Pools that still need warming, as (key, count) work items.
     pub fn pending_warm(&self) -> Vec<(ShapeKey, u32)> {
         self.targets
-            .iter()
-            .filter_map(|(k, _)| {
+            .keys()
+            .filter_map(|k| {
                 let d = self.deficit(k);
                 if d > 0 {
                     Some((k.clone(), d))

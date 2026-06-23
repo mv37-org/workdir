@@ -217,7 +217,7 @@ pub async fn org_sandboxes(
         .list_sandboxes_for_org(&org)
         .map_err(ApiError::Internal)?;
     sbs.retain(|s| s.state != LfState::Deleted);
-    sbs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    sbs.sort_by_key(|sb| std::cmp::Reverse(sb.created_at));
     let views: Vec<Value> = sbs
         .iter()
         .map(|sb| views::sandbox_view(&state, sb))

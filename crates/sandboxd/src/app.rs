@@ -254,7 +254,6 @@ fn detect_total_memory_gb() -> f64 {
             for line in text.lines() {
                 if let Some(rest) = line.strip_prefix("MemTotal:") {
                     if let Some(kb) = rest
-                        .trim()
                         .split_whitespace()
                         .next()
                         .and_then(|v| v.parse::<f64>().ok())
