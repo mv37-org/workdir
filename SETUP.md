@@ -56,7 +56,8 @@ Smoke-test it:
 ```bash
 bash examples/quickstart_dev.sh          # create → exec → preview → delete
 # or the Python SDK:
-WORKDIR_URL=http://127.0.0.1:8080 WORKDIR_KEY=sk_live_dev python3 sdk/python/sandbox_sdk.py
+WORKDIR_URL=http://127.0.0.1:8080 WORKDIR_API_KEY=sk_live_dev \
+  python3 sdk/python/src/workdir/__init__.py
 ```
 
 ---
@@ -131,6 +132,9 @@ Reference: [`deploy/config.example.toml`](deploy/config.example.toml).
 | `WORKDIR_PUBLIC_HTTPS` | `true`/`false` scheme in preview URLs |
 | `WORKDIR_PUBLIC_PORT` | include this port in preview URLs (non-443/80) |
 | `WORKDIR_SECRET_KEY` | base64 32-byte AES key for secret encryption |
+| `WORKDIR_RPC_TOKEN` | shared control-plane/worker token for `/internal` node RPC |
+| `WORKDIR_STANDBY` | `1`/`true` to enable perpetual standby |
+| `WORKDIR_FC_NO_SECCOMP` | `1`/`true` to disable Firecracker's built-in seccomp filter |
 
 ---
 

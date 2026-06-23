@@ -105,6 +105,8 @@ console.log(box.urls.ports["3000"]);   // public preview URL, served through an 
 - **Secrets** — store org secrets (encrypted at rest, AES-256-GCM), reference them by name; they're injected at runtime and never land in a snapshot.
 - **Docker-in-Docker** — `docker: { enabled: true }` runs `dockerd` *inside* a docker-capable microVM image (never the host socket).
 - **S3 mounts** — mount a bucket into the sandbox via `mountpoint-s3` when the guest image includes the mount helper.
+- **Persistent volumes** — attach org-scoped ext4 volumes that survive sandbox deletion and reattach to later sandboxes.
+- **Interactive PTY** — open a WebSocket shell backed by a real in-guest TTY over vsock on Firecracker.
 - **Ephemeral files & images** — drop inline files into a sandbox at boot, or build throwaway images that auto-expire.
 
 Full reference: **[docs/FEATURES.md](docs/FEATURES.md)** and **[docs/API.md](docs/API.md)**.
@@ -141,7 +143,7 @@ The control plane is platform-independent and talks to the data plane through a 
 
 ## Status
 
-The control plane, SDKs, mock runtime, scheduler, lifecycle, billing, secrets, preview proxy, and Firecracker runtime are implemented and covered by the test suite. Self-hosted production use requires a KVM Linux host plus built/staged guest kernel and rootfs artifacts for the image families you enable. Before exposing a public multi-tenant deployment, review the deferred hardening items in [docs/REVIEW.md](docs/REVIEW.md). Internally the crate is named `sandboxd`; the shipped binary and CLI are `workdir`.
+The control plane, SDKs, mock runtime, scheduler, lifecycle, billing, secrets, preview proxy, PTY, persistent volumes, and Firecracker runtime are implemented and covered by the test suite. Self-hosted production use requires a KVM Linux host plus built/staged guest kernel and rootfs artifacts for the image families you enable. Before exposing a public multi-tenant deployment, review the deferred hardening items in [docs/REVIEW.md](docs/REVIEW.md). Internally the crate is named `sandboxd`; the shipped binary and CLI are `workdir`.
 
 ## Contributing
 

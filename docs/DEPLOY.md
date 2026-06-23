@@ -1,6 +1,6 @@
-# Deploying sandboxd
+# Deploying workdir
 
-This guide covers deploying sandboxd on Hetzner dedicated servers: a single
+This guide covers deploying workdir on Hetzner dedicated servers: a single
 all-in-one node first, then adding capacity one node at a time, draining, and
 the day-2 operations playbooks. It maps directly to spec §7, §8, and §24.
 
@@ -80,11 +80,11 @@ The installer (`deploy/install.sh`) performs the spec §7.3 sequence:
 1. **Preflight** (and **fails clearly if KVM is unavailable**): `/dev/kvm`,
    CPU virtualization flags, cgroups v2, nftables, kernel version, RAM, disk,
    ports, DNS wildcard readiness.
-2. Creates the `sandboxd` system user.
+2. Creates the `workdir` system user.
 3. Installs Firecracker + jailer.
 4. Installs and enables the host-agent systemd unit.
 5. Configures cgroups v2 and nftables/NAT (`deploy/nftables/sandbox-nat.nft`).
-6. Installs the preview/VNC proxy (part of the `sandboxd` binary).
+6. Installs the preview/VNC proxy (part of the `workdir` binary).
 7. Writes `/etc/workdir/config.toml`.
 8. Runs `workdir doctor` and reports host capacity.
 
@@ -148,15 +148,17 @@ monthly cost.
 3. On the control plane, mint a token:
      curl -s -X POST https://api.sandboxes.example.com/v1/nodes/join-token \
        -H "Authorization: Bearer <admin-key>"
-4. Run the worker install (preflight validates KVM before joining):
+4. Set the same `node.rpc_token` (or `WORKDIR_RPC_TOKEN`) on the control plane
+   and the worker. This shared secret enables the worker's `/internal` API.
+5. Run the worker install (preflight validates KVM before joining):
      curl -fsSL https://workdir.dev/install.sh | sudo bash -s -- \
        --role worker \
        --control-plane https://api.sandboxes.example.com \
        --join-token <token>
-5. Wait for preflight validation.
-6. Stage the same guest kernel/rootfs artifacts used by the control-plane node.
-7. Confirm the hot pool is ready.
-8. Mark the node schedulable.
+6. Wait for preflight validation.
+7. Stage the same guest kernel/rootfs artifacts used by the control-plane node.
+8. Confirm the hot pool is ready.
+9. Mark the node schedulable.
 ```
 
 The node-join flow (spec §8) registers the node, verifies host capabilities,
@@ -228,18 +230,23 @@ or run `workdir gen-config`. Key fields:
 
 | Section | Field | Meaning |
 |---|---|---|
-| `server` | `bind`, `public_domain`, `data_dir` | listen address, wildcard preview domain, state dir |
-| `node` | `role` | `all-in-one` or `worker` |
-| `node` | `control_plane_url`, `join_token` | worker → control-plane join |
+| `server` | `bind`, `public_domain`, `public_https`, `public_port`, `data_dir` | listen address, wildcard preview URL settings, state dir |
+| `node` | `role`, `node_id`, `advertise_addr`, `total_memory_gb` | node identity and advertised capacity |
+| `node` | `control_plane_url`, `join_token`, `rpc_token` | worker join plus control-plane/worker RPC auth |
 | `runtime` | `kind` | `firecracker` (prod) or `mock` (dev) |
-| `runtime` | `firecracker_bin`, `jailer_bin`, `kernel_image`, `images_dir`, `workspace_dir` | data-plane paths |
+| `runtime` | `firecracker_bin`, `jailer_bin`, `kernel_image`, `images_dir`, `workspace_dir`, `volumes_dir` | data-plane paths |
+| `runtime` | `use_jailer`, `jailer_uid_base`, `firecracker_no_seccomp` | jailer isolation and Firecracker seccomp behavior |
+| `runtime` | `restore_mem_backend`, `prewarm_mem_cache`, `shared_rootfs`, `cpu_template`, `quiet_guest_boot`, `jailer_pool_size`, `balloon` | snapshot, density, boot-latency, and memory tuning |
 | `pricing` | `default_unit_price_usd_hr`, `image_multipliers`, `monthly_node_cost_usd` | at-cost pricing model |
 | `hotpool` | `enabled`, `base_target`, `warm_interval_seconds` | hot-pool warmer |
+| `standby` | `enabled`, `balloon_idle_seconds` | perpetual standby and soft-standby ballooning |
+| `capacity` | `host_reserve_gb`, `practical_derate`, `overcommit`, `overcommit_headroom_gb`, `psi_standby_threshold` | admission and pressure backpressure |
 | `auth` | `bootstrap_admin_key`, `bootstrap_org` | first-boot admin key |
 
 Environment overrides (handy for containers/tests): `WORKDIR_BIND`,
 `WORKDIR_DATA_DIR`, `WORKDIR_PUBLIC_DOMAIN`, `WORKDIR_RUNTIME`,
-`WORKDIR_ADMIN_KEY`, `WORKDIR_CONFIG`.
+`WORKDIR_ADMIN_KEY`, `WORKDIR_CONFIG`, `WORKDIR_RPC_TOKEN`,
+`WORKDIR_STANDBY`, `WORKDIR_FC_NO_SECCOMP`.
 
 ---
 
@@ -247,8 +254,12 @@ Environment overrides (handy for containers/tests): `WORKDIR_BIND`,
 
 Programmed by the installer + host agent:
 
-- Firecracker **jailer** enabled, unique uid/gid range per microVM.
-- cgroups v2 for CPU/memory/pids/IO; seccomp for host agent + Firecracker.
+- Firecracker **jailer** support, unique uid/gid range per microVM. The
+  `deploy/provision-node.sh` production path enables `runtime.use_jailer = true`;
+  set it explicitly if you use the generic installer for a tenant-facing node.
+- cgroups v2 for CPU/memory/pids/IO; Firecracker seccomp remains on unless
+  `runtime.firecracker_no_seccomp = true` is set for snapshot/restore
+  troubleshooting.
 - **No Docker socket** inside public sandboxes; no privileged host mounts.
 - Cloud metadata IPs blocked; outbound SMTP blocked by default
   (`deploy/nftables/sandbox-nat.nft`).

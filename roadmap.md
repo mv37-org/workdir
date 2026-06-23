@@ -15,7 +15,8 @@ The expensive foundation is built:
 - **pause/resume wired**, **hot-pool warmer**, **idle reaper**, **scheduler
   scoring across nodes**, per-second billing.
 - Extended features: secrets (AES-256-GCM), docker-in-docker, S3 mounts,
-  ephemeral files/images, opt-in coding agent.
+  ephemeral files/images, opt-in coding agent, browser/VNC/CDP, PTY, and
+  persistent volumes.
 
 The named gaps (updated as phases 0–3 landed):
 
@@ -25,18 +26,17 @@ The named gaps (updated as phases 0–3 landed):
   control-plane restart** (per-VM records persisted to disk).
 - ~~**Resume latency is unmeasured.**~~ **Done (Phase 0):** the benchmark harness
   publishes p50/p90/p95 per boot path; mock-validated, KVM-ready.
-- **Worker execution RPC is not wired** — the scheduler spans nodes, but
-  execution is single-box ([docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)). (Phase 4,
-  still deferred; the new `standby`/`restore`/`fork` ops are already plumbed
-  through the `RemoteNodeClient` + `/internal` RPC for when it lands.)
-- Browser/VNC desktops, worker RPC, and the jailer are **prototyped on
-  `feat/browser-jailer-multinode`**, not on `main`.
-- ~~No fork/clone or in-RAM shared-page rootfs.~~ **Fork + in-RAM shared rootfs
-  done (Phase 3), both LIVE on the node.** No persistent volumes yet.
+- **Worker RPC is wired for the data path** through `RemoteNodeClient` +
+  `/internal` when `node.rpc_token` is configured. Remaining multi-node work is
+  remote PTY/preview proxying, image distribution, and two-box production
+  validation.
+- Browser/VNC desktops, the jailer path, fork/shared rootfs, PTY, and persistent
+  volumes are on `main`; production use still depends on staging the right
+  guest kernel/rootfs artifacts per node.
 - Running on a single dev-grade node (~20 units).
 
 The gap is specific, not a rewrite. We own the hard primitives; what remains is
-lifecycle orchestration, latency tuning, and scale-out.
+operational hardening, latency tuning, and scale-out validation.
 
 ## Two axes
 
@@ -109,12 +109,12 @@ Ruled out along the way (with evidence): seccomp (`--no-seccomp`, `Seccomp: 0`),
   the jailer relaunch, which a ready-Firecracker pool — not UFFD — would address);
   it remains worthwhile only for future post-copy live migration.
 
-## Landed 2026-06-12 — density, speed, volumes, PTY (mock-validated; KVM validation pending)
+## Landed 2026-06-12 — density, speed, volumes, PTY
 
 A coordinated batch driving Phases 2/3/5 forward plus two restart-hardening
-bug fixes. Everything below is validated against the mock runtime (full
-integration suite) and compiles for Firecracker; the KVM-bound paths need one
-validation pass on the node.
+bug fixes. The mock integration suite covers the orchestration paths; the
+feature notes below call out the KVM/node validation that has landed and any
+remaining operational caveats.
 
 **Bug fixes (restart hardening):**
 - **Jail GC no longer destroys parked standby VMs after a daemon restart.**
@@ -192,8 +192,8 @@ p50/p90/p95 at `GET /v1/benchmarks`; `POST /v1/benchmarks/run` (admin) runs a
 sweep across **every curated image** at its own shape (`{"image":"all"}`, the
 default) or a single named one. Validated end to end against the mock runtime
 (`benchmark_harness_separates_boot_paths`, `benchmark_sweep_covers_all_curated_images`).
-The only remaining step is operational: run one sweep on a `/dev/kvm` node to
-capture the production numbers.
+Run fresh sweeps on each `/dev/kvm` node class after changing runtime/image
+configuration so published numbers stay tied to the active deployment.
 
 ### Phase 1 — Perpetual standby (1) (2–4 weeks)
 
@@ -226,10 +226,9 @@ restart. Validated end to end against the mock runtime
 (`standby_preserves_state_and_auto_resumes`: state survives, $0 while parked,
 auto-resume < 200ms; `standby_survives_control_plane_restart`: a fresh
 server/runtime on the same data dir restores the parked sandbox with its disk
-intact). The Firecracker `standby`/`restore` paths compile and are correct by
-review; they need a `/dev/kvm` host to measure. Open follow-up: re-entering the
-jailer chroot on restore (today's restore relaunches Firecracker directly — the
-microVM is still the boundary, logged as a defense-in-depth reduction).
+intact), and on the KVM node as described in the production notes above. Restore
+now relaunches under the jailer with a fresh chroot and re-stages the snapshot
+artifacts before `snapshot/load`.
 
 ### Phase 2 — Resume latency to target (2–4 weeks)
 
@@ -244,16 +243,13 @@ Drive `snapshot_restore` from hundreds of ms down to **< 25ms**. Levers, in orde
 
 **Target:** p50 resume < 25ms, p90 < 50ms — measured, not asserted.
 
-**Status:** partially landed; the rest is KVM-bound. Done: mem-file page-cache
-prewarm before restore (lever #2), a `restore_mem_backend` config (`file`/`uffd`)
-that the restore path honors, a `cpu_template` knob for cross-host portability
-(lever #4), and the Phase 0 harness measuring `snapshot_restore` p50/p90 so the
-target is tracked. The mock runtime simulates the optimized resume so the
-orchestration is validated against the < 25ms/< 50ms targets. **Not yet
-implemented:** the userfaultfd page handler itself — selecting `uffd` currently
-falls back to the (prewarmed) `File` backend with a warning rather than configure
-a backend with no handler; the handler is Linux+KVM-only and must be validated on
-a real node. Diff snapshots (lever #3) and smaller base VMs (lever #5) remain.
+**Status:** mostly landed without a userspace UFFD handler. Done: lazy `File`
+mem backends with page-cache behavior measured on the node, background prewarm
+instead of restore-path prewarm, diff snapshots, a `restore_mem_backend` config
+that keeps `uffd` reserved until a real handler exists, a `cpu_template` knob for
+cross-host portability, quiet guest boot, exponential backoff, and optional
+pre-spawned jailers to remove the measured relaunch floor. Smaller base VMs and
+any future post-copy/live-migration UFFD work remain deferred.
 
 ### Phase 3 — Density and fork (2–4 weeks)
 
@@ -295,9 +291,12 @@ overlay path already delivers the shared-page-cache density today.
 
 ### Phase 4 — Scale out: worker RPC (3–6 weeks)
 
-Wire `RemoteNodeClient` so the scheduler actually executes on workers (already
-scaffolded in `remote.rs` on the feature branch — finish and merge). This flips
-us from vertical to horizontal.
+`RemoteNodeClient` is wired on `main`: when the control plane and worker share
+`node.rpc_token`, data-plane placement, exec, files, ports, readiness,
+lifecycle, snapshots, standby/restore, fork, delete, and hot-pool queries go
+through the worker's `/internal` API. The remaining work is remote PTY and
+host-routed preview proxying, automatic image distribution, and a two-box
+production validation pass.
 
 **Target:** an N-node cluster running thousands of concurrent sandboxes. After
 this, capacity is a hardware question, not an architecture one.
@@ -310,9 +309,9 @@ this, capacity is a hardware question, not an architecture one.
   `GET /v1/sandboxes/:id/browser/screenshot` — a PNG of the live X desktop
   (captured with ImageMagick `import`, then read back; verified end to end). It
   also gets the Phase 3 shared-rootfs overlay (the browser init pivots into a
-  tmpfs+overlayfs root). *Known follow-up:* Chrome's CDP debug port (9222)
-  doesn't bind under chrome-as-root, so the advertised `cdp` url is dead until
-  chrome runs as a non-root user — VNC + screenshot are unaffected.
+  tmpfs+overlayfs root). Chrome binds CDP to loopback, and the browser init
+  forwards it to the guest IP, so VNC, screenshot, and CDP are available through
+  preview routes.
 - **Persistent volumes — done, validated on the node.** Org-scoped block storage
   (`/v1/volumes` CRUD) backed by ext4 images under `runtime.volumes_dir`. Attach
   at create with `volumes: [{volume_id, mount_path}]`; the backing image is
@@ -333,11 +332,8 @@ are large investments; product parity comes first.
 
 ## Sequencing
 
-Run **0 → 1 → 2** as the spine: Firecracker isolation + perpetual standby +
-measured sub-25ms resume, all achievable on the current box. Run **Phase 5** in
-parallel by merging what is already prototyped on the branch. Defer **Phase 4**
-until the per-sandbox story is proven.
-
-The highest-leverage first move is **Phase 1**: it turns primitives we already
-own (snapshot + pause + reaper) into the one feature that changes what workdir
-is.
+The near-term sequence is operational: run fresh benchmark sweeps on each KVM
+host class, enable and measure standby/density knobs per node, keep
+browser/volume images staged, then harden remote PTY/preview proxying and image
+distribution for multi-node production. Scaling should follow measured per-node
+behavior, not replace it.

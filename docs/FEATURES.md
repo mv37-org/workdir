@@ -1,8 +1,9 @@
 # Extended Features
 
-Four capabilities added on top of the base spec: secret management,
-docker-in-docker, S3 bucket mounts, and ephemeral files/images. All are opt-in
-and preserve the cheap default path (a no-option `create()` is unchanged).
+Capabilities added on top of the base spec: secret management, docker-in-docker,
+S3 bucket mounts, ephemeral files/images, coding agent, and persistent volumes.
+All are opt-in and preserve the cheap default path (a no-option `create()` is
+unchanged).
 
 ---
 
@@ -196,13 +197,44 @@ with a `400`. Works on any curated image (all ship `curl` + default egress).
 
 ---
 
+## 6. Persistent volumes
+
+Attach org-scoped block storage that survives sandbox deletion, so workspace
+state can move from one sandbox session to the next.
+
+Create the volume once:
+
+```bash
+curl -X POST $API/v1/volumes -H "$AUTH" \
+  -d '{"name":"project-cache","size_gb":20}'
+```
+
+Attach it at sandbox create:
+
+```jsonc
+{
+  "volumes": [
+    { "volume_id": "vol_...", "mount_path": "/mnt/project" }
+  ]
+}
+```
+
+A volume attaches to at most one running sandbox at a time, refuses deletion
+while attached, detaches when the sandbox is deleted, and can be reattached to a
+later sandbox. On Firecracker it is a labelled ext4 backing image staged into
+the jailer chroot; the mock runtime simulates the same flow with host
+directories. Attaching a volume forces a cold boot because the extra virtio drive
+is configured before VM start, and fork is refused while volumes are attached.
+
+---
+
 ## Create request — full option surface
 
 ```jsonc
 {
   "image": "base | node-python | browser | heavy-build | custom/<org>/<name>",
   "image_version": "2026-06-10-ab12cd",
-  "resources": { "cpu": 0.5|1|2|4, "memory_mb": 1024|2048|4096|8192|16384, "disk_gb": 8|16|32|64 },
+  "resources": { "cpu": 0.5|1|2|4, "memory_mb": 512|1024|2048|4096|8192|16384, "disk_gb": 8|16|32|64 },
   "auto_stop_seconds": 30..3600,
   "snapshot": false,
   "browser": { "enabled": true, "vnc": true, "cdp": true },
@@ -210,6 +242,7 @@ with a `400`. Works on any curated image (all ship `curl` + default egress).
   "coding_agent": { "enabled": true, "kind": "opencode", "version": "latest" },
   "secrets-> via startup.secrets": [],
   "mounts":  [{ "type": "s3", "bucket": "...", "mount_path": "/mnt/...", "read_only": true }],
+  "volumes": [{ "volume_id": "vol_...", "mount_path": "/mnt/project" }],
   "files":   [{ "path": "...", "content": "...", "encoding": "utf8|base64" }],
   "startup": { "git": {...}, "env": {...}, "secrets": [...], "commands": [...],
                "ports": [...], "ready": {...} }

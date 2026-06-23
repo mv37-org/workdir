@@ -36,7 +36,7 @@ plus `deleting → deleted` and `failed`.
   explicit `POST .../resume`.
 - **`standby`** is automatic: when a sandbox is idle past `auto_stop_seconds`,
   the reaper snapshots it, frees its RAM, and parks it in `standby` at **$0**.
-  The **next request** (`exec`, file read/write, `expose`, `fork`)
+  The **next request** (`exec`, file read/write, `expose`, browser, `fork`)
   **transparently auto-resumes** it — the caller just sees a slightly slower
   first call. To the user the sandbox stays alive; it simply stops costing
   anything while idle. (Sandboxes with resident secrets are never snapshotted, so
@@ -95,11 +95,12 @@ rejected with `400 bad_request`:
   "state": "running",
   "resources": { "cpu": "1 shared vCPU", "memory_mb": 2048, "disk_gb": 8 },
   "node_id": "node_…",
-  "boot_path": "hot_pool",          // hot_pool | snapshot_restore | cold_boot
+  "boot_path": "hot_pool",          // hot_pool | snapshot_restore | cold_boot | fork
   "boot_ms": 42,
   "browser_ready_ms": 1280,          // present only for browser sandboxes
   "coding_agent": "opencode",        // present only when the coding agent is opted in
   "auto_stop_seconds": 120,
+  "snapshot_enabled": false,
   "timings": { "boot_ms": 42, "image_cache_ms": 0, "git_ms": 0,
                "install_ms": 0, "ready_ms": 0, "total_ms": 43 },
   "urls": { "ports": { "3000": "https://sbx_…-3000.<domain>" },
@@ -151,7 +152,7 @@ Reference secrets in `startup.secrets: ["NAME", ...]`; values are injected into
 the sandbox env after assignment. A sandbox with resident secrets cannot be
 snapshotted (`409`).
 
-## Persistent volumes (Phase 5)
+## Persistent volumes
 
 Org-scoped block storage that **survives sandbox deletion**, so workspace state
 persists across sessions. A volume attaches to at most one running sandbox at a
@@ -179,6 +180,7 @@ Added to `POST /v1/sandboxes` (all optional, default-off):
   "coding_agent": { "enabled": true },           // install opencode CLI into the guest (opt-in; any image)
   "mounts": [ { "type": "s3", "bucket": "my-data", "mount_path": "/mnt/data",
                 "read_only": true, "prefix": "p/", "region": "us-east-1" } ],
+  "volumes": [ { "volume_id": "vol_...", "mount_path": "/mnt/project" } ],
   "files":  [ { "path": "config.json", "content": "{}", "encoding": "utf8" } ]
 }
 ```
@@ -257,4 +259,4 @@ target discovery.
 `conflict` (409), `rejected` (422), `no_capacity` (503, with `reason`),
 `internal` (500). `no_capacity.reason` is one of `no_nodes`,
 `no_schedulable_nodes`, `no_browser_capable_node`, `memory_admission`,
-`remote_placement_unsupported`.
+`no_fit`.

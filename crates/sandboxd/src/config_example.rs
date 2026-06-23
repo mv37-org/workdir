@@ -16,11 +16,14 @@ advertise_addr = ""         # internal address other nodes use; defaults to bind
 total_memory_gb = 0.0       # auto-detected when 0
 control_plane_url = ""      # workers only
 join_token = ""             # workers only
+rpc_token = ""              # shared control-plane/worker token for /internal RPC
 
 [runtime]
 kind = "firecracker"        # "firecracker" (Linux + /dev/kvm) or "mock" (dev)
 firecracker_bin = "/usr/local/bin/firecracker"
 jailer_bin = "/usr/local/bin/jailer"
+use_jailer = false          # true = run VMMs under jailer; requires root daemon
+jailer_uid_base = 100000    # first uid/gid used for per-VM jailer isolation
 kernel_image = "/var/lib/workdir/kernel/vmlinux"
 images_dir = "/var/lib/workdir/images"
 workspace_dir = "/var/lib/workdir/workspaces"
@@ -34,6 +37,7 @@ jailer_pool_size = 0           # pre-spawned idle jailer+Firecracker processes; 
 # Density (roadmap Phase 3):
 shared_rootfs = false          # share one read-only base rootfs across all VMs (hardlinked → one host page-cache copy); the guest layers tmpfs+overlayfs for writes. ext4-ro base today; erofs+DAX is a future guest-kernel rebuild
 balloon = false                # virtio-balloon on every VM: enables the soft-standby tier + per-VM guest memory stats
+firecracker_no_seccomp = false # true adds --no-seccomp for snapshot/restore troubleshooting
 
 [pricing]
 default_unit_price_usd_hr = 0.009

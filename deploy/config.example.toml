@@ -17,18 +17,26 @@ advertise_addr = ""           # internal address peers use; defaults to bind
 total_memory_gb = 0.0         # auto-detected when 0
 control_plane_url = ""        # workers: e.g. https://api.sandboxes.example.com
 join_token = ""               # workers: token from POST /v1/nodes/join-token
+rpc_token = ""                # shared control-plane/worker token for /internal RPC
 
 [runtime]
 kind = "firecracker"          # "firecracker" (prod, Linux+/dev/kvm) or "mock" (dev)
 firecracker_bin = "/usr/local/bin/firecracker"
 jailer_bin = "/usr/local/bin/jailer"
+use_jailer = false            # true = run VMMs under jailer; requires root daemon
+jailer_uid_base = 100000      # first uid/gid used for per-VM jailer isolation
 kernel_image = ""             # defaults to <data_dir>/kernel/vmlinux
 images_dir = ""               # defaults to <data_dir>/images
 workspace_dir = ""            # defaults to <data_dir>/workspaces
 volumes_dir = ""              # defaults to <data_dir>/volumes (persistent volumes)
+restore_mem_backend = "file"  # "file"; "uffd" is reserved for a future handler
+prewarm_mem_cache = true      # warm snapshot mem files before restore
+shared_rootfs = false         # share read-only curated rootfs page cache when images support it
+cpu_template = ""             # optional Firecracker CPU template for snapshot portability
 quiet_guest_boot = true       # skip serial boot logging (faster cold boot)
 jailer_pool_size = 0          # pre-spawned jailers for sub-resume-floor restores (0 = off)
 balloon = false               # virtio-balloon: soft standby + guest memory stats
+firecracker_no_seccomp = false # true adds --no-seccomp for snapshot/restore troubleshooting
 
 [pricing]
 # Worked example for a ~EUR 44/month, 64 GB Hetzner EX44 node.

@@ -154,18 +154,18 @@ later if the control plane is split out.
 ## Multi-node: what is wired vs scaffolded
 
 **Wired and working across nodes:** node registry, join tokens, capability/KVM
-preflight, drain, capacity accounting, hot-pool status, and the **scheduler**,
-which scores all registered nodes.
+preflight, drain, capacity accounting, hot-pool status, the **scheduler**, and
+the `RemoteNodeClient` data path. When `node.rpc_token` is set on the control
+plane and worker, the control plane forwards placement, exec, file, port expose,
+ready-check, lifecycle, snapshot, standby/restore, fork, delete, and hot-pool
+queries over the worker's token-authenticated `/internal` API.
 
-**Single-node execution today:** the `NodeClient` trait (`src/node.rs`) is the
-seam for executing the data path on a chosen node. `LocalNode` implements it for
-the control plane's own node and is the fully-working path. A `RemoteNodeClient`
-(control plane → worker host agent over an internal API) plugs into the same trait
-to execute placements on workers; that worker RPC is the remaining increment for
-true multi-node *execution*. Until it is enabled, `create_sandbox` returns a
-clear `no_capacity / remote_placement_unsupported` error if the scheduler picks a
-non-local node, rather than silently mis-routing. Everything else (registry,
-join, drain, scheduling decisions, capacity math) already spans the cluster.
+**Still local-only / needs production validation:** PTY and host-routed preview
+traffic are served by the node that receives the public request today, so remote
+PTY/preview proxying is the next multi-node increment. Image distribution is
+also operator-managed: curated/custom artifacts must be staged on nodes before
+they accept placements. Treat horizontal execution as wired but requiring a
+two-box validation pass before relying on it for production capacity.
 
 ## Background loops (`src/background.rs`)
 
