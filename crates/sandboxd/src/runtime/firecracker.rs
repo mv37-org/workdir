@@ -274,6 +274,12 @@ pub struct FirecrackerRuntime {
     /// Launch Firecracker with `--no-seccomp` (see config docs); needed for
     /// snapshot/create under the jailer on some kernels (firecracker#1088).
     no_seccomp: bool,
+    /// Operator asserted the data FS supports reflinks; gate the multi-GB
+    /// fork / private-disk copies fail-closed when the probe disagrees.
+    require_reflink: bool,
+    /// One-time probe result: does the data FS under `chroot_base` support
+    /// `cp --reflink`? Cached at construction so the hot path adds no syscall.
+    reflink_supported: bool,
     next_cid: AtomicU32,
     next_tap: AtomicU32,
     /// Monotonic suffix for restore jail ids (the jailer refuses an existing
@@ -314,6 +320,29 @@ impl FirecrackerRuntime {
         //    (`setup_tap`'s `link del` then yanks a restored VM's NIC), and
         //    restores reused `-rN` chroot names the jailer refuses.
         let (vms, next_tap, next_cid, next_restore) = Self::rehydrate(&chroot_base);
+        let reflink_supported = probe_reflink(&chroot_base);
+        // Surface the reflink capability at boot: an operator on a non-reflink FS
+        // otherwise has zero signal that every fork / golden-staging will pay a
+        // full multi-GB copy, and one who set require_reflink gets no confirmation
+        // of whether the fail-closed guard is armed or about to bail.
+        match (cfg.require_reflink, reflink_supported) {
+            (_, true) => tracing::info!(
+                data_fs = ?chroot_base,
+                "reflink (FICLONE) supported; fork/golden staging is instant CoW"
+            ),
+            (false, false) => tracing::warn!(
+                data_fs = ?chroot_base,
+                "data filesystem does not support reflink (FICLONE); fork/golden \
+                 staging will pay full multi-GB copies — move the data dir to \
+                 xfs/btrfs or set require_reflink to fail closed"
+            ),
+            (true, false) => tracing::warn!(
+                data_fs = ?chroot_base,
+                "require_reflink is set but the data filesystem does not support \
+                 reflink (FICLONE); every fork and golden-staging copy will \
+                 HARD-FAIL — move the data dir to xfs/btrfs or unset require_reflink"
+            ),
+        }
         FirecrackerRuntime {
             firecracker_bin: cfg.firecracker_bin.clone(),
             jailer_bin: cfg.jailer_bin.clone(),
@@ -331,6 +360,8 @@ impl FirecrackerRuntime {
             balloon: cfg.balloon,
             quiet_boot: cfg.quiet_guest_boot,
             no_seccomp: cfg.firecracker_no_seccomp,
+            require_reflink: cfg.require_reflink,
+            reflink_supported,
             next_cid: AtomicU32::new(next_cid),
             next_tap: AtomicU32::new(next_tap),
             next_restore: AtomicU32::new(next_restore),
@@ -787,11 +818,7 @@ impl FirecrackerRuntime {
             if self.shared_for(spec) && std::fs::hard_link(&rootfs, &rdst).is_ok() {
                 // shared inode staged (read-only, world-readable)
             } else {
-                tokio::process::Command::new("cp")
-                    .args(["--reflink=auto"])
-                    .arg(&rootfs)
-                    .arg(&rdst)
-                    .status()
+                self.reflink_copy(&rootfs, &rdst)
                     .await
                     .context("stage rootfs into chroot")?;
                 let _ = tokio::process::Command::new("chown")
@@ -842,11 +869,7 @@ impl FirecrackerRuntime {
                 rootfs.to_string_lossy().into_owned()
             } else {
                 let overlay = jail.join("overlay.ext4");
-                tokio::process::Command::new("cp")
-                    .args(["--reflink=auto"])
-                    .arg(&rootfs)
-                    .arg(&overlay)
-                    .status()
+                self.reflink_copy(&rootfs, &overlay)
                     .await
                     .context("create COW overlay (is the rootfs present?)")?;
                 overlay.to_string_lossy().into_owned()
@@ -1245,6 +1268,52 @@ impl FirecrackerRuntime {
         }
     }
 
+    /// Copy a (potentially multi-GB) artifact reflink-first, FAILING LOUD.
+    ///
+    /// On a reflink-capable FS (xfs/btrfs/ext4-reflink) `cp --reflink=auto`
+    /// shares extents — the copy is instant and costs no extra space. On a
+    /// non-reflink FS it degrades to a full byte copy, which on the fork /
+    /// private-disk hot path means silently emitting a multi-GB image. The
+    /// `require_reflink` gate refuses that: when the operator asserted reflink
+    /// support but the startup probe disagreed, bail BEFORE running cp rather
+    /// than burn the disk. Unlike the old `let _ = cp` sites this also bails on
+    /// a non-success cp status, so a failed copy can never masquerade as a
+    /// complete artifact (mirrors the old `publish_golden_file` check).
+    async fn reflink_copy(&self, from: &Path, to: &Path) -> Result<()> {
+        if self.require_reflink && !self.reflink_supported {
+            bail!(
+                "reflink required but data filesystem does not support it; \
+                 refusing a multi-GB full copy ({from:?} -> {to:?}) — set \
+                 require_reflink=false or move the data dir to a reflink-capable \
+                 FS (xfs/btrfs)"
+            );
+        }
+        let _ = std::fs::remove_file(to);
+        let st = tokio::process::Command::new("cp")
+            .args(["--reflink=auto"])
+            .arg(from)
+            .arg(to)
+            .status()
+            .await
+            .context("reflink cp")?;
+        if !st.success() {
+            bail!("reflink cp failed: {from:?} -> {to:?}");
+        }
+        Ok(())
+    }
+
+    /// Publish one golden artifact: reflink-copy it (instant on a reflink fs,
+    /// real I/O on ext4 — one-time per image+shape) and make it world-readable,
+    /// since restored VMs run as per-VM jailed uids and only ever read these.
+    async fn publish_golden_file(&self, from: &Path, to: &Path) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        self.reflink_copy(from, to)
+            .await
+            .with_context(|| format!("publish golden artifact {from:?} -> {to:?}"))?;
+        let _ = std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o644));
+        Ok(())
+    }
+
     /// Pause a VM and snapshot (memory + device state) into `jail`, returning the
     /// (snapshot_file, mem_file) paths. Shared by `snapshot`, `standby`, `fork`.
     ///
@@ -1415,10 +1484,13 @@ impl FirecrackerRuntime {
             // snapshot-time disk and restores hardlink it directly. Private-disk
             // images diverge during boot, so their disk must be published too.
             if !self.shared_for(spec) {
-                publish_golden_file(&jail.join("rootfs.ext4"), &dir.join("rootfs.ext4")).await?;
+                self.publish_golden_file(&jail.join("rootfs.ext4"), &dir.join("rootfs.ext4"))
+                    .await?;
             }
-            publish_golden_file(&mem, &dir.join("mem.file")).await?;
-            publish_golden_file(&snap, &dir.join("snapshot.file")).await?;
+            self.publish_golden_file(&mem, &dir.join("mem.file"))
+                .await?;
+            self.publish_golden_file(&snap, &dir.join("snapshot.file"))
+                .await?;
             Ok(())
         }
         .await;
@@ -1529,17 +1601,12 @@ impl FirecrackerRuntime {
                         .context("hardlink shared base for golden restore")?;
                 } else {
                     // Private-disk images: an own (reflink) copy of the golden's
-                    // snapshot-time disk, so this VM diverges independently.
-                    let st = tokio::process::Command::new("cp")
-                        .args(["--reflink=auto"])
-                        .arg(dir.join("rootfs.ext4"))
-                        .arg(chroot_root.join("rootfs.ext4"))
-                        .status()
+                    // snapshot-time disk, so this VM diverges independently. Routed
+                    // through the fail-loud helper so `require_reflink` gates this
+                    // multi-GB copy too.
+                    self.reflink_copy(&dir.join("rootfs.ext4"), &chroot_root.join("rootfs.ext4"))
                         .await
                         .context("copy golden rootfs")?;
-                    if !st.success() {
-                        bail!("copy golden rootfs failed");
-                    }
                     let _ = tokio::process::Command::new("chown")
                         .arg(format!("{uid}:{uid}"))
                         .arg(chroot_root.join("rootfs.ext4"))
@@ -2406,7 +2473,15 @@ impl Runtime for FirecrackerRuntime {
         // Clone a sibling from the parent's live snapshot (roadmap Phase 3). The
         // parent keeps running; the child gets its own disk copy, host tap, CID,
         // and (re-IP'd) guest networking.
-        let (parent_sock, parent_jail, parent_image, has_secrets, mutation_seq, cache_seq) = {
+        let (
+            parent_sock,
+            parent_jail,
+            parent_image,
+            has_secrets,
+            mutation_seq,
+            cache_seq,
+            snapshotted,
+        ) = {
             let vms = self.vms.lock().unwrap();
             let v = vms
                 .get(parent_handle)
@@ -2418,6 +2493,7 @@ impl Runtime for FirecrackerRuntime {
                 v.has_secrets,
                 v.mutation_seq,
                 v.fork_cache_seq,
+                v.snapshotted,
             )
         };
         if has_secrets {
@@ -2443,15 +2519,26 @@ impl Runtime for FirecrackerRuntime {
             tracing::info!(parent = %parent_handle, "fork: reusing cached parent snapshot");
         } else {
             // Snapshot the parent, then resume it so the fork is non-disruptive.
-            self.write_snapshot(&parent_sock, &parent_jail, false)
+            // Reuse standby's Diff-vs-Full decision (the third arg IS `snapshotted`):
+            // when a base mem.file already exists AND dirty tracking is live, take a
+            // Diff — only the pages dirtied since the last snapshot are rewritten
+            // *in place* onto the existing mem.file (~0-7s), leaving a COMPLETE
+            // current image. Otherwise take a Full to CREATE the base (~23s). A
+            // golden-restored parent keeps `snapshotted=false` (its mem.file is a
+            // SHARED hardlinked inode that must never be diffed in place), so it
+            // correctly falls to a Full first — gating on `parent_mem.exists()`
+            // alone would corrupt that shared inode.
+            let parent_has_base = snapshotted && parent_mem.exists();
+            self.write_snapshot(&parent_sock, &parent_jail, parent_has_base)
                 .await?;
             self.fc_api(&parent_sock, "PATCH", "/vm", &json!({"state": "Resumed"}))
                 .await?;
             if let Some(v) = self.vms.lock().unwrap().get_mut(parent_handle) {
                 v.fork_cache_seq = Some(v.mutation_seq);
-                // A full mem.file base now exists; the parent's next standby can
-                // take a Diff onto it (Firecracker resets dirty tracking at each
-                // snapshot create, so the chain stays consistent).
+                // A base mem.file now exists either way (a Full just created it, or a
+                // Diff overwrote dirty pages of an existing base) — the parent's next
+                // standby/fork can take a Diff. Firecracker resets dirty tracking at
+                // each snapshot create, so the chain stays consistent.
                 v.snapshotted = true;
             }
             self.persist_record(parent_handle);
@@ -2468,6 +2555,20 @@ impl Runtime for FirecrackerRuntime {
         let cid = self.next_cid.fetch_add(1, Ordering::SeqCst);
         setup_tap(&tap).await.context("fork: child tap")?;
 
+        // Everything from here on allocates child resources (firecracker/jailer
+        // process, the staged artifacts, the in-map record). Any `?` below would
+        // otherwise leak the live child microVM, its tap, jail dir, and (post
+        // vms.insert) a dangling map entry — exactly what create()'s booted-match
+        // arm guards against (search "each failed boot leaks a live microVM").
+        // Mirror that: run the bringup inside a guard and reclaim on Err. `pid`
+        // is captured outward so the killer can reach it even if a stage between
+        // spawn and vms.insert fails (the record — and thus the map-based tap
+        // delete — does not exist yet, so cleanup is done explicitly here).
+        let mut child_pid: Option<u32> = None;
+        // Cloned for the error path: `tap` is moved into the record built inside
+        // the guard, but a pre-insert failure still needs to delete it by name.
+        let tap_for_cleanup = tap.clone();
+        let bringup: Result<u64> = async {
         // Bring up the child Firecracker (jailer-aware, mirroring restore) and
         // stage artifacts: snapshot + mem are COPIED (the child is independent),
         // the rootfs is reflink-copied so the child gets its OWN writable disk.
@@ -2499,20 +2600,15 @@ impl Runtime for FirecrackerRuntime {
             // child gets an instant CoW private copy (it diverges independently)
             // instead of a multi-second full read+write of the 2 GB mem image.
             let _ = std::fs::copy(&parent_snap, new_chroot.join("snapshot.file"));
-            let reflink = |from: PathBuf, to: PathBuf| async move {
-                let _ = tokio::process::Command::new("cp")
-                    .args(["--reflink=auto"])
-                    .arg(from)
-                    .arg(to)
-                    .status()
-                    .await;
-            };
-            reflink(parent_mem.clone(), new_chroot.join("mem.file")).await;
-            reflink(
-                parent_jail.join("rootfs.ext4"),
-                new_chroot.join("rootfs.ext4"),
+            self.reflink_copy(&parent_mem, &new_chroot.join("mem.file"))
+                .await
+                .context("fork: reflink child mem.file")?;
+            self.reflink_copy(
+                &parent_jail.join("rootfs.ext4"),
+                &new_chroot.join("rootfs.ext4"),
             )
-            .await;
+            .await
+            .context("fork: reflink child rootfs")?;
             let owner = format!("{uid}:{uid}");
             let _ = tokio::process::Command::new("chown")
                 .arg("-R")
@@ -2525,19 +2621,16 @@ impl Runtime for FirecrackerRuntime {
             (new_api, new_chroot.join("vsock.sock"), pid)
         } else {
             let _ = std::fs::copy(&parent_snap, child_jail.join("snapshot.file"));
-            let _ = tokio::process::Command::new("cp")
-                .args(["--reflink=auto"])
-                .arg(&parent_mem)
-                .arg(child_jail.join("mem.file"))
-                .status()
-                .await;
+            self.reflink_copy(&parent_mem, &child_jail.join("mem.file"))
+                .await
+                .context("fork: reflink child mem.file")?;
             if parent_jail.join("overlay.ext4").exists() {
-                let _ = tokio::process::Command::new("cp")
-                    .args(["--reflink=auto"])
-                    .arg(parent_jail.join("overlay.ext4"))
-                    .arg(child_jail.join("overlay.ext4"))
-                    .status()
-                    .await;
+                self.reflink_copy(
+                    &parent_jail.join("overlay.ext4"),
+                    &child_jail.join("overlay.ext4"),
+                )
+                .await
+                .context("fork: reflink child overlay.ext4")?;
             }
             let child_sock = child_jail.join("api.sock");
             let _ = std::fs::remove_file(&child_sock);
@@ -2555,6 +2648,7 @@ impl Runtime for FirecrackerRuntime {
             poll_until(Duration::from_secs(4), || child_sock.exists()).await;
             (child_sock, child_jail.join("vsock.sock"), pid)
         };
+        child_pid = pid;
 
         // Warm the child's mem file in the background, then load *paused* — load
         // FIRST (the snapshot restores its own vsock); paths are chroot-relative
@@ -2636,6 +2730,33 @@ impl Runtime for FirecrackerRuntime {
         })).await;
         // Apply the child's own env/files/agent/mounts on top of the inherited state.
         let agent_ms = self.apply_features(&child, child_spec).await?;
+        Ok(agent_ms)
+        }
+        .await;
+
+        let agent_ms = match bringup {
+            Ok(agent_ms) => agent_ms,
+            Err(e) => {
+                let fc_log =
+                    std::fs::read_to_string(child_jail.join("firecracker.log")).unwrap_or_default();
+                tracing::error!(
+                    child = %child,
+                    parent = %parent_handle,
+                    error = %e,
+                    firecracker_log = %fc_log.lines().rev().take(8).collect::<Vec<_>>().join(" | "),
+                    "fork child bringup failed; reclaiming"
+                );
+                // Drop any partial map entry first, then reclaim. kill_and_reclaim
+                // removes the record's tap via the map; the tap was set up before
+                // the record exists, so delete it by name too (idempotent) to cover
+                // failures between setup_tap and vms.insert.
+                child_pid =
+                    child_pid.or_else(|| self.vms.lock().unwrap().get(&child).and_then(|r| r.pid));
+                self.kill_and_reclaim(&child, child_pid, &child_jail).await;
+                let _ = run_ip(&["link", "del", &tap_for_cleanup]).await;
+                return Err(e);
+            }
+        };
 
         Ok(VmInstance {
             handle: child,
@@ -2717,24 +2838,36 @@ impl Runtime for FirecrackerRuntime {
     }
 }
 
-/// Publish one golden artifact: reflink-copy (instant on a reflink fs, real
-/// I/O on ext4 — one-time per image+shape) and make it world-readable, since
-/// restored VMs run as per-VM jailed uids and only ever read these.
-async fn publish_golden_file(from: &Path, to: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::remove_file(to);
-    let st = tokio::process::Command::new("cp")
-        .args(["--reflink=auto"])
-        .arg(from)
-        .arg(to)
-        .status()
-        .await
-        .context("cp golden artifact")?;
-    if !st.success() {
-        bail!("publish golden artifact failed: {from:?} -> {to:?}");
+/// Probe whether the data filesystem under `chroot_base` supports reflinks
+/// (`cp --reflink=always` / FICLONE). Runs once at construction: creates a
+/// tiny temp file, attempts a reflink copy to a sibling, and reports whether it
+/// succeeded. Any error (mkdir/write/cp failure, unsupported FS) → false. Both
+/// temp files are removed regardless. The result is cached on the runtime so
+/// the per-fork hot path adds no syscall.
+fn probe_reflink(chroot_base: &Path) -> bool {
+    use std::io::Write;
+    if std::fs::create_dir_all(chroot_base).is_err() {
+        return false;
     }
-    let _ = std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o644));
-    Ok(())
+    let src = chroot_base.join(".reflink-probe.src");
+    let dst = chroot_base.join(".reflink-probe.dst");
+    let _ = std::fs::remove_file(&dst);
+    let probe = (|| -> std::io::Result<bool> {
+        let mut f = std::fs::File::create(&src)?;
+        f.write_all(b"reflink-probe")?;
+        f.sync_all()?;
+        drop(f);
+        let st = std::process::Command::new("cp")
+            .arg("--reflink=always")
+            .arg(&src)
+            .arg(&dst)
+            .status()?;
+        Ok(st.success())
+    })()
+    .unwrap_or(false);
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&dst);
+    probe
 }
 
 fn shell_quote(s: &str) -> String {

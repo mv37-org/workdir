@@ -237,6 +237,7 @@ or run `workdir gen-config`. Key fields:
 | `runtime` | `firecracker_bin`, `jailer_bin`, `kernel_image`, `images_dir`, `workspace_dir`, `volumes_dir` | data-plane paths |
 | `runtime` | `use_jailer`, `jailer_uid_base`, `firecracker_no_seccomp` | jailer isolation and Firecracker seccomp behavior |
 | `runtime` | `restore_mem_backend`, `prewarm_mem_cache`, `shared_rootfs`, `cpu_template`, `quiet_guest_boot`, `jailer_pool_size`, `balloon` | snapshot, density, boot-latency, and memory tuning |
+| `runtime` | `require_reflink` | fail-closed guard: when `true`, fork / golden-staging hard-fail on a non-reflink data FS instead of silently paying a multi-GB full copy. See [RUNBOOK §10 Fork & reflink](RUNBOOK.md#10-fork--reflink) |
 | `pricing` | `default_unit_price_usd_hr`, `image_multipliers`, `monthly_node_cost_usd` | at-cost pricing model |
 | `hotpool` | `enabled`, `base_target`, `warm_interval_seconds` | hot-pool warmer |
 | `standby` | `enabled`, `balloon_idle_seconds` | perpetual standby and soft-standby ballooning |

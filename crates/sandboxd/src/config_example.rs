@@ -39,6 +39,7 @@ jailer_pool_size = 0           # pre-spawned idle jailer+Firecracker processes; 
 shared_rootfs = false          # share one read-only base rootfs across all VMs (hardlinked → one host page-cache copy); the guest layers tmpfs+overlayfs for writes. ext4-ro base today; erofs+DAX is a future guest-kernel rebuild
 balloon = false                # virtio-balloon on every VM: enables the soft-standby tier + per-VM guest memory stats
 firecracker_no_seccomp = false # true adds --no-seccomp for snapshot/restore troubleshooting
+require_reflink = false        # true = probe the data FS for reflink (FICLONE) at startup and FAIL CLOSED: fork/private-disk staging bail rather than silently emit a multi-GB full copy on a non-reflink FS (xfs/btrfs support it; ext4 needs -O reflink)
 
 [pricing]
 default_unit_price_usd_hr = 0.009
