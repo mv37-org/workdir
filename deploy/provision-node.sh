@@ -100,16 +100,24 @@ id -u workdir >/dev/null 2>&1 || useradd --system --home "$DATA_DIR" --shell /us
 install -d -o workdir -g workdir "$DATA_DIR" "$DATA_DIR/kernel" "$DATA_DIR/images" "$DATA_DIR/workspaces" "$DATA_DIR/volumes" /etc/workdir
 usermod -aG kvm workdir
 
-# Warn loudly when the workspaces fs cannot reflink: every fork/golden staging
-# then pays full multi-GB copies (the measured ~58s fork on the ext4 node).
+# Probe whether the workspaces fs can reflink. On success we arm the daemon's
+# fail-closed guard (require_reflink=true in the generated config below) so a
+# later FS change that silently kills reflink fails LOUD instead of regressing to
+# full multi-GB copies on every fork/golden staging (the measured ~58s fork on
+# ext4). On failure we leave the guard off (it would hard-fail here, since the FS
+# genuinely cannot reflink) and tell the operator the exact remediation.
+REFLINK_OK=0
 probe="$DATA_DIR/.reflink-probe"
 echo x > "$probe.src"
 if cp --reflink=always "$probe.src" "$probe.dst" 2>/dev/null; then
-  log "  reflink OK: fork/golden staging will be instant CoW"
+  REFLINK_OK=1
+  log "  reflink OK: fork/golden staging will be instant CoW (arming require_reflink)"
 else
   log "  WARNING: $DATA_DIR cannot reflink (ext4?). Forks and golden-snapshot"
-  log "  staging pay full multi-GB copies. Re-run with DATA_FS_DEVICE=<empty"
-  log "  partition> to mount an XFS (reflink) volume here."
+  log "  staging pay full multi-GB copies (see docs/RUNBOOK.md §Fork & reflink)."
+  log "  Re-run with DATA_FS_DEVICE=<empty partition> to mount an XFS (reflink)"
+  log "  volume here, then add 'require_reflink = true' under [runtime] in"
+  log "  /etc/workdir/config.toml to fail closed if reflink ever regresses."
 fi
 rm -f "$probe.src" "$probe.dst"
 
@@ -195,6 +203,15 @@ if [ ! -f /root/workdir-admin-key.txt ]; then
   chmod 600 /root/workdir-admin-key.txt
 fi
 ADMIN_KEY="$(cat /root/workdir-admin-key.txt)"
+# Arm the daemon's fail-closed reflink guard only on a reflink-capable data FS,
+# so a future FS regression surfaces loudly instead of silently paying full
+# multi-GB fork/golden copies. On a non-reflink FS the guard would hard-fail
+# every fork, so it stays off and the operator gets the remediation above.
+if [ "$REFLINK_OK" = 1 ]; then
+  REQUIRE_REFLINK_LINE="require_reflink = true"
+else
+  REQUIRE_REFLINK_LINE="require_reflink = false   # data FS lacks reflink; see docs/RUNBOOK.md §Fork & reflink"
+fi
 if [ ! -f /etc/workdir/config.toml ]; then
   cat > /etc/workdir/config.toml <<EOF
 [server]
@@ -219,6 +236,7 @@ jailer_bin = "/usr/local/bin/jailer"
 kernel_image = "$DATA_DIR/kernel/vmlinux"
 images_dir = "$DATA_DIR/images"
 workspace_dir = "$DATA_DIR/workspaces"
+$REQUIRE_REFLINK_LINE
 
 [hotpool]
 enabled = true

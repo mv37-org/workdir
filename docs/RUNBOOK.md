@@ -228,3 +228,45 @@ forwards data-plane ops to whichever node it places a sandbox on.
 - Limitations today: PTY and the preview proxy are served for **local** sandboxes
   only; remote PTY/preview proxying is the next step. Validate on two boxes
   before relying on it.
+
+---
+
+## 10. Fork & reflink
+
+`fork` (clone a sibling sandbox from a live parent) and golden-snapshot staging
+copy the parent's multi-GB `mem.file` / `rootfs.ext4` into the child's jail. On a
+**reflink-capable** filesystem (xfs, btrfs, or ext4 formatted with `-O reflink`)
+these copies are instant copy-on-write — they share extents and cost no extra
+disk. On a filesystem **without** reflink (plain ext4, tmpfs) they degrade to a
+full byte-for-byte copy: the measured cost was ~58s per fork on the ext4 node, on
+top of the parent snapshot, and it grows the disk by the full image size every
+time.
+
+**Verify the data FS supports reflink** (same probe `provision-node.sh` runs):
+
+```bash
+cd /var/lib/workdir/workspaces        # the data dir
+echo x > .reflink-probe.src
+cp --reflink=always .reflink-probe.src .reflink-probe.dst && echo "reflink OK" || echo "NO reflink"
+rm -f .reflink-probe.src .reflink-probe.dst
+```
+
+**Remediation if it says NO reflink:** move the data dir onto an xfs/btrfs volume.
+Re-run `provision-node.sh` with `DATA_FS_DEVICE=<empty partition>` (formats it XFS
+with `reflink=1` and mounts it at the data dir), or `DATA_FS_LOOPBACK_GB=<size>`
+for a loopback XFS image when there is no spare device.
+
+**Fail-closed knob** — `require_reflink` under `[runtime]` in
+`/etc/workdir/config.toml`:
+
+- `false` (default) — copies fall back to a real full copy on a non-reflink FS.
+  Forks still work, just slowly and at full disk cost.
+- `true` — the daemon probes the data FS once at startup; if it does **not**
+  support reflink, every fork / golden-staging copy hard-fails instead of
+  silently emitting a multi-GB copy. `provision-node.sh` arms this automatically
+  on a reflink-capable node so a later FS regression surfaces loudly. The daemon
+  also logs the reflink capability at boot (`info` when supported, `warn` when
+  not), so `journalctl -u workdir` tells you the current state.
+
+Only the fork / private-disk hot-path copies are gated; restore's legitimate
+cross-FS copies are unaffected.

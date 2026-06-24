@@ -13,6 +13,12 @@
 //! - `snapshot_restore` — boot, evict to standby (snapshot + free RAM), then
 //!   `restore`. This is the perpetual-standby resume path, i.e. the exact number
 //!   Phase 2 drives toward < 25ms.
+//! - `fork` — boot a FRESH parent, then `fork` one sibling from it. Because the
+//!   parent is new and unsnapshotted, this always pays the parent's first Full
+//!   snapshot (~23s for a 2 GB guest) inside the timed window — it measures
+//!   cold-parent-snapshot + child clone + paused load + resume, NOT the warm
+//!   cache-valid / Diff fan-out path (that needs N forks from one parent, which
+//!   this single-fork harness does not exercise).
 
 use crate::catalog::classify;
 use crate::ids;
@@ -203,6 +209,38 @@ async fn measure_restore(
     out
 }
 
+/// Fork: clone a sibling from a live parent. Boot a FRESH parent, then time one
+/// `fork`. The parent is unsnapshotted, so the timed window includes its first
+/// Full snapshot (~23s) — this is the cold-parent + child clone + paused load +
+/// resume cost, NOT the warm reuse/Diff fan-out path (one fork per fresh parent
+/// can never hit `cache_valid`). BOTH the child and the parent are always torn
+/// down, even if fork errors.
+async fn measure_fork(
+    rt: &Arc<dyn Runtime>,
+    image: &str,
+    res: Resources,
+) -> Result<BenchmarkSample> {
+    let parent = rt.create(&bench_spec(image, res), None, false).await?;
+    let out = async {
+        // Fresh sandbox_id so the child is a distinct VM, not a re-create.
+        let child_spec = bench_spec(image, res);
+        let start = Instant::now();
+        let inst = rt.fork(&parent.handle, &child_spec).await?;
+        let ready = Instant::now();
+        let ready_ms = inst
+            .boot_ms
+            .max(ready.duration_since(start).as_millis() as u64);
+        echo(rt, &inst.handle).await;
+        let echo_done = Instant::now();
+        let s = sample(image, BootPath::Fork, ready, ready_ms, echo_done, start);
+        let _ = rt.delete(&inst.handle).await;
+        Ok(s)
+    }
+    .await;
+    let _ = rt.delete(&parent.handle).await;
+    out
+}
+
 /// Run `iterations` measurements of each boot path against the local runtime,
 /// persisting every sample. `image` is a curated name or `"all"` (every curated
 /// image at its minimum shape). A target whose rootfs is not built on this node
@@ -222,6 +260,7 @@ pub async fn run_sweep(state: &AppState, image: &str, iterations: u32) -> Vec<Be
                 ("cold_boot", measure_cold(&rt, &img, res).await),
                 ("hot_pool", measure_hot(&rt, &img, res).await),
                 ("snapshot_restore", measure_restore(&rt, &img, res).await),
+                ("fork", measure_fork(&rt, &img, res).await),
             ] {
                 match result {
                     Ok(s) => {
