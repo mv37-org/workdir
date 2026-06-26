@@ -2234,7 +2234,18 @@ impl Runtime for FirecrackerRuntime {
         // snapshot, and wait for the guest agent. After a control-plane restart
         // the in-memory record is gone, so rehydrate it from disk first.
         self.ensure_record_loaded(handle);
-        let (api_sock, jail, vsock_uds, tap, tap_idx, guest_ip_record, volumes, image_key, sandbox_id, network) = {
+        let (
+            api_sock,
+            jail,
+            vsock_uds,
+            tap,
+            tap_idx,
+            guest_ip_record,
+            volumes,
+            image_key,
+            sandbox_id,
+            network,
+        ) = {
             let vms = self.vms.lock().unwrap();
             let v = vms
                 .get(handle)

@@ -131,8 +131,7 @@ fn default_ready_timeout() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-#[derive(PartialEq, Eq)]
-#[derive(Default)]
+#[derive(PartialEq, Eq, Default)]
 pub enum EgressMode {
     #[default]
     Default,
@@ -237,10 +236,7 @@ impl NetworkRule {
             return Err("network rule value cannot be empty".into());
         }
         if self.ports.iter().any(|p| *p == 0) {
-            return Err(format!(
-                "network rule '{}' has invalid port 0",
-                self.value
-            ));
+            return Err(format!("network rule '{}' has invalid port 0", self.value));
         }
         match self.kind {
             NetworkRuleKind::Cidr => {
@@ -309,7 +305,10 @@ impl NetworkPolicy {
     }
 
     pub fn uses_domain_rules(&self) -> bool {
-        self.allow.iter().chain(self.deny.iter()).any(NetworkRule::is_domain)
+        self.allow
+            .iter()
+            .chain(self.deny.iter())
+            .any(NetworkRule::is_domain)
     }
 
     pub fn rules_for_mode(&self) -> &[NetworkRule] {
@@ -352,23 +351,31 @@ fn validate_domain_pattern(value: &str) -> Result<(), String> {
     }
     let host = value.strip_prefix("*.").unwrap_or(value);
     if host.len() > 253 || host.is_empty() || !host.contains('.') {
-        return Err(format!("network domain rule '{value}' is not a valid domain"));
+        return Err(format!(
+            "network domain rule '{value}' is not a valid domain"
+        ));
     }
     for label in host.split('.') {
         let bytes = label.as_bytes();
         if bytes.is_empty() || bytes.len() > 63 {
-            return Err(format!("network domain rule '{value}' has an invalid label"));
+            return Err(format!(
+                "network domain rule '{value}' has an invalid label"
+            ));
         }
         let first = bytes[0];
         let last = bytes[bytes.len() - 1];
         if first == b'-' || last == b'-' {
-            return Err(format!("network domain rule '{value}' has an invalid label"));
+            return Err(format!(
+                "network domain rule '{value}' has an invalid label"
+            ));
         }
         if !bytes
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
         {
-            return Err(format!("network domain rule '{value}' has an invalid label"));
+            return Err(format!(
+                "network domain rule '{value}' has an invalid label"
+            ));
         }
     }
     Ok(())

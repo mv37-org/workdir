@@ -73,7 +73,11 @@ pub fn start_dns_proxy() -> Result<()> {
             tracing::error!(error = %e, "sandbox egress DNS proxy stopped");
         }
     });
-    tracing::info!(bind = DNS_PROXY_BIND, upstream = DNS_UPSTREAM, "sandbox egress DNS proxy listening");
+    tracing::info!(
+        bind = DNS_PROXY_BIND,
+        upstream = DNS_UPSTREAM,
+        "sandbox egress DNS proxy listening"
+    );
     Ok(())
 }
 
@@ -82,12 +86,10 @@ async fn serve_dns(sock: UdpSocket) -> Result<()> {
     loop {
         let (n, peer) = sock.recv_from(&mut buf).await?;
         let packet = buf[..n].to_vec();
-        let response = handle_dns_packet(peer, &packet)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::debug!(error = %e, peer = %peer, "DNS policy handling failed");
-                dns_error_response(&packet, 2).unwrap_or_default()
-            });
+        let response = handle_dns_packet(peer, &packet).await.unwrap_or_else(|e| {
+            tracing::debug!(error = %e, peer = %peer, "DNS policy handling failed");
+            dns_error_response(&packet, 2).unwrap_or_default()
+        });
         if !response.is_empty() {
             let _ = sock.send_to(&response, peer).await;
         }
@@ -174,7 +176,11 @@ fn parse_question(packet: &[u8]) -> Option<DnsQuestion> {
         if len & 0xc0 != 0 || len > 63 || pos + len > packet.len() {
             return None;
         }
-        labels.push(std::str::from_utf8(&packet[pos..pos + len]).ok()?.to_ascii_lowercase());
+        labels.push(
+            std::str::from_utf8(&packet[pos..pos + len])
+                .ok()?
+                .to_ascii_lowercase(),
+        );
         pos += len;
     }
     if pos + 4 > packet.len() {
@@ -353,8 +359,12 @@ fn add_dns_control_rules(lines: &mut Vec<String>, chain: &str, policy: &NetworkP
     lines.push(format!(
         "add rule inet {NFT_TABLE} {chain} ip daddr {DNS_PROXY_IP} tcp dport 53 accept"
     ));
-    lines.push(format!("add rule inet {NFT_TABLE} {chain} udp dport 53 drop"));
-    lines.push(format!("add rule inet {NFT_TABLE} {chain} tcp dport 53 drop"));
+    lines.push(format!(
+        "add rule inet {NFT_TABLE} {chain} udp dport 53 drop"
+    ));
+    lines.push(format!(
+        "add rule inet {NFT_TABLE} {chain} tcp dport 53 drop"
+    ));
 }
 
 fn add_rule_lines(
@@ -514,7 +524,10 @@ async fn delete_policy_jumps(sandbox_id: &str) -> Result<()> {
         if !line.contains(&needle) {
             continue;
         }
-        if let Some(handle) = line.split("# handle ").nth(1).and_then(|s| s.split_whitespace().next())
+        if let Some(handle) = line
+            .split("# handle ")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
         {
             let _ = run_nft_args(&[
                 "delete",
@@ -615,11 +628,14 @@ mod tests {
     #[test]
     fn parses_a_records_from_compressed_dns_response() {
         let packet = [
-            0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x07,
-            b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00,
-            0x01, 0x00, 0x01, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c,
-            0x00, 0x04, 93, 184, 216, 34,
+            0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x07, b'e',
+            b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00,
+            0x01, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 93, 184,
+            216, 34,
         ];
-        assert_eq!(parse_a_records(&packet), vec![Ipv4Addr::new(93, 184, 216, 34)]);
+        assert_eq!(
+            parse_a_records(&packet),
+            vec![Ipv4Addr::new(93, 184, 216, 34)]
+        );
     }
 }
