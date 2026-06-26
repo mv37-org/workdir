@@ -38,6 +38,11 @@ mkdir -p /workspace /run /tmp /var/log
 # to 127.0.0.1 (and the socat forward targets 127.0.0.1:9222). With lo DOWN the
 # bind fails with EADDRNOTAVAIL and CDP never starts — independent of any eth0.
 ip link set lo up
+# Guests ship with an empty /etc/hosts (it's a runtime bind-mount under Docker,
+# so `docker export` captures nothing), which makes `localhost` fail to resolve.
+# noVNC's websockify connects to localhost:5900, so without this it fails with
+# "Name or service not known" and VNC never bridges. Seed loopback names.
+printf '127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n' > /etc/hosts
 WDIP=""; WDGW=""; WDDNS="1.1.1.1"
 for tok in $(cat /proc/cmdline); do
   case "$tok" in
