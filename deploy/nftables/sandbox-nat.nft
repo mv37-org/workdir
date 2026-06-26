@@ -8,6 +8,8 @@
 # Apply with:  nft -f /etc/nftables.d/sandbox-nat.nft
 # Persist via /etc/nftables.conf `include "/etc/nftables.d/*.nft"`.
 
+destroy table inet sandboxd
+
 table inet sandboxd {
     # Sandboxes live on this private supernet; one /30 (or tap) per microVM.
     define SANDBOX_NET = 10.200.0.0/16

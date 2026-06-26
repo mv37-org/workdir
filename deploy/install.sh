@@ -150,6 +150,8 @@ if [[ -f "$(dirname "$0")/nftables/sandbox-nat.nft" ]]; then
   install -m 0644 "$(dirname "$0")/nftables/sandbox-nat.nft" /etc/nftables.d/sandbox-nat.nft
 else
   cat > /etc/nftables.d/sandbox-nat.nft <<'NFT'
+destroy table inet sandboxd
+
 table inet sandboxd {
     define SANDBOX_NET = 10.200.0.0/16
     define HOST_DNS = 10.200.0.1
@@ -186,6 +188,12 @@ grep -q 'include "/etc/nftables.d/\*.nft"' /etc/nftables.conf 2>/dev/null \
 nft -f /etc/nftables.d/sandbox-nat.nft 2>/dev/null || warn "nft apply deferred until reboot"
 sysctl -qw net.ipv4.ip_forward=1
 echo 'net.ipv4.ip_forward=1' >/etc/sysctl.d/99-workdir.conf
+
+if command -v ufw >/dev/null 2>&1; then
+  ufw allow in on wdbr0 to 10.200.0.1 port 53 proto udp >/dev/null 2>&1 || true
+  ufw allow in on wdbr0 to 10.200.0.1 port 53 proto tcp >/dev/null 2>&1 || true
+  ufw reload >/dev/null 2>&1 || true
+fi
 
 # ---------------------------------------------------------------------------
 # 6. Config + systemd unit

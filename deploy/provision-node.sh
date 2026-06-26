@@ -149,10 +149,12 @@ systemctl enable --now workdir-net >/dev/null 2>&1
 if command -v ufw >/dev/null 2>&1; then
   sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
   ufw allow 22/tcp >/dev/null 2>&1 || true
+  ufw allow in on ${BRIDGE} to 10.200.0.1 port 53 proto udp >/dev/null 2>&1 || true
+  ufw allow in on ${BRIDGE} to 10.200.0.1 port 53 proto tcp >/dev/null 2>&1 || true
   yes | ufw enable >/dev/null 2>&1 || true
   ufw reload >/dev/null 2>&1 || true
 fi
-log "  uplink=$UPLINK, forwarding on, ufw routes allowed"
+log "  uplink=$UPLINK, forwarding on, controlled DNS allowed"
 
 # --- 5. build the daemon ---------------------------------------------------
 if ! command -v cargo >/dev/null 2>&1; then
