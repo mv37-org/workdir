@@ -117,6 +117,10 @@ class Sandbox:
     def price(self) -> dict:
         return self._data.get("price", {})
 
+    @property
+    def network(self) -> dict:
+        return self._data.get("network", {})
+
     def refresh(self) -> "Sandbox":
         self._data = self._http.request("GET", f"/v1/sandboxes/{self.id}")
         return self
@@ -147,8 +151,14 @@ class Sandbox:
     def browser(self) -> dict:
         return self._http.request("GET", f"/v1/sandboxes/{self.id}/browser")
 
+    def metrics(self) -> dict:
+        return self._http.request("GET", f"/v1/sandboxes/{self.id}/metrics")
+
     def snapshot(self) -> dict:
         return self._http.request("POST", f"/v1/sandboxes/{self.id}/snapshot")
+
+    def fork(self) -> "Sandbox":
+        return Sandbox(self._http, self._http.request("POST", f"/v1/sandboxes/{self.id}/fork"))
 
     def pause(self) -> "Sandbox":
         self._data = self._http.request("POST", f"/v1/sandboxes/{self.id}/pause")
@@ -184,10 +194,21 @@ class _Images:
     def __init__(self, http: _Http):
         self._http = http
 
-    def create(self, name: str, source: dict, resources_hint: Optional[dict] = None) -> dict:
+    def create(
+        self,
+        name: str,
+        source: dict,
+        resources_hint: Optional[dict] = None,
+        ephemeral: bool = False,
+        ttl_seconds: Optional[int] = None,
+    ) -> dict:
         body = {"name": name, "source": source}
         if resources_hint:
             body["resources_hint"] = resources_hint
+        if ephemeral:
+            body["ephemeral"] = True
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = ttl_seconds
         return self._http.request("POST", "/v1/images", body)
 
     def get(self, image_id: str) -> dict:
@@ -198,6 +219,23 @@ class _Images:
 
     def delete(self, image_id: str) -> dict:
         return self._http.request("DELETE", f"/v1/images/{image_id}")
+
+
+class _Volumes:
+    def __init__(self, http: _Http):
+        self._http = http
+
+    def create(self, name: str, size_gb: int) -> dict:
+        return self._http.request("POST", "/v1/volumes", {"name": name, "size_gb": size_gb})
+
+    def get(self, volume_id: str) -> dict:
+        return self._http.request("GET", f"/v1/volumes/{volume_id}")
+
+    def list(self) -> list[dict]:
+        return self._http.request("GET", "/v1/volumes").get("volumes", [])
+
+    def delete(self, volume_id: str) -> dict:
+        return self._http.request("DELETE", f"/v1/volumes/{volume_id}")
 
 
 class _Nodes:
@@ -235,6 +273,7 @@ class Client:
         self._http = _Http(base_url, api_key, timeout)
         self.sandboxes = _Sandboxes(self._http)
         self.images = _Images(self._http)
+        self.volumes = _Volumes(self._http)
         self.nodes = _Nodes(self._http)
         self.secrets = _Secrets(self._http)
 

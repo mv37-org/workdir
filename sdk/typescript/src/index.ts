@@ -54,6 +54,11 @@ export interface EphemeralFileInput {
   encoding?: "utf8" | "base64";
 }
 
+export interface VolumeAttachInput {
+  volume_id: string;
+  mount_path: string;
+}
+
 export interface CreateOptions {
   resources?: ResourcesInput;
   image?: string;
@@ -74,6 +79,8 @@ export interface CreateOptions {
   mounts?: MountInput[];
   /** Inline ephemeral files written into the workspace at boot. */
   files?: EphemeralFileInput[];
+  /** Persistent block volumes to attach inside the guest. */
+  volumes?: VolumeAttachInput[];
 }
 
 export interface ExecResult {
@@ -131,6 +138,7 @@ export class Sandbox {
   get timings(): Record<string, number> { return this.data.timings ?? {}; }
   get urls(): Record<string, any> { return this.data.urls ?? {}; }
   get price(): Record<string, number> { return this.data.price ?? {}; }
+  get network(): Record<string, any> { return this.data.network ?? {}; }
 
   async refresh(): Promise<Sandbox> {
     this.data = await this.http.request("GET", `/v1/sandboxes/${this.id}`);
@@ -166,8 +174,16 @@ export class Sandbox {
     return this.http.request("GET", `/v1/sandboxes/${this.id}/browser`);
   }
 
+  async metrics(): Promise<any> {
+    return this.http.request("GET", `/v1/sandboxes/${this.id}/metrics`);
+  }
+
   async snapshot(): Promise<any> {
     return this.http.request("POST", `/v1/sandboxes/${this.id}/snapshot`);
+  }
+
+  async fork(): Promise<Sandbox> {
+    return new Sandbox(this.http, await this.http.request("POST", `/v1/sandboxes/${this.id}/fork`));
   }
 
   async pause(): Promise<Sandbox> {
@@ -209,12 +225,32 @@ class Sandboxes {
 
 class Images {
   constructor(private http: Http) {}
-  create(name: string, source: Record<string, unknown>, resourcesHint?: Record<string, unknown>) {
-    return this.http.request("POST", "/v1/images", { name, source, resources_hint: resourcesHint });
+  create(
+    name: string,
+    source: Record<string, unknown>,
+    resourcesHint?: Record<string, unknown>,
+    opts: { ephemeral?: boolean; ttl_seconds?: number } = {},
+  ) {
+    return this.http.request("POST", "/v1/images", {
+      name,
+      source,
+      resources_hint: resourcesHint,
+      ...opts,
+    });
   }
   get(id: string) { return this.http.request("GET", `/v1/images/${id}`); }
   list() { return this.http.request("GET", "/v1/images"); }
   delete(id: string) { return this.http.request("DELETE", `/v1/images/${id}`); }
+}
+
+class Volumes {
+  constructor(private http: Http) {}
+  create(name: string, sizeGb: number) {
+    return this.http.request("POST", "/v1/volumes", { name, size_gb: sizeGb });
+  }
+  get(id: string) { return this.http.request("GET", `/v1/volumes/${id}`); }
+  list() { return this.http.request("GET", "/v1/volumes"); }
+  delete(id: string) { return this.http.request("DELETE", `/v1/volumes/${id}`); }
 }
 
 class Nodes {
@@ -235,6 +271,7 @@ class Secrets {
 export class Client {
   readonly sandboxes: Sandboxes;
   readonly images: Images;
+  readonly volumes: Volumes;
   readonly nodes: Nodes;
   readonly secrets: Secrets;
   private http: Http;
@@ -243,6 +280,7 @@ export class Client {
     this.http = new Http(baseUrl, apiKey);
     this.sandboxes = new Sandboxes(this.http);
     this.images = new Images(this.http);
+    this.volumes = new Volumes(this.http);
     this.nodes = new Nodes(this.http);
     this.secrets = new Secrets(this.http);
   }

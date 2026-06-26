@@ -140,6 +140,9 @@ rejected with `400 bad_request`:
   "urls": { "ports": { "3000": "https://sbx_…-3000.<domain>" },
             "vnc": "https://sbx_…-6080.<domain>",
             "cdp": "https://sbx_…-9222.<domain>" },
+  "mounts": [],
+  "volumes": [],
+  "network": { "egress": "default" },
   "price": { "resource_units": 1.0, "image_multiplier": 1.0,
              "unit_price_usd_hr": 0.009, "price_usd_hr": 0.009,
              "price_usd_second": 0.0000025 },
@@ -215,7 +218,13 @@ Added to `POST /v1/sandboxes` (all optional, default-off):
   "mounts": [ { "type": "s3", "bucket": "my-data", "mount_path": "/mnt/data",
                 "read_only": true, "prefix": "p/", "region": "us-east-1" } ],
   "volumes": [ { "volume_id": "vol_...", "mount_path": "/mnt/project" } ],
-  "files":  [ { "path": "config.json", "content": "{}", "encoding": "utf8" } ]
+  "files":  [ { "path": "config.json", "content": "{}", "encoding": "utf8" } ],
+  "startup": {
+    "network": {
+      "egress": "allowlist",
+      "allow": [{ "type": "domain", "value": "api.openai.com", "protocol": "tcp", "ports": [443] }]
+    }
+  }
 }
 ```
 

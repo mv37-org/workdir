@@ -99,15 +99,204 @@ const box = await workdir.sandboxes.create({
 console.log(box.urls.ports["3000"]);   // public preview URL, served through an authenticated proxy
 ```
 
-### More capabilities
+### Feature examples
 
-- **Browser automation** — `image: "browser"` gives you Chromium + Playwright with noVNC and CDP URLs once the browser rootfs is built on the node.
-- **Secrets** — store org secrets (encrypted at rest, AES-256-GCM), reference them by name; they're injected at runtime and never land in a snapshot.
-- **Docker-in-Docker** — `docker: { enabled: true }` runs `dockerd` *inside* a docker-capable microVM image (never the host socket).
-- **S3 mounts** — mount a bucket into the sandbox via `mountpoint-s3` when the guest image includes the mount helper.
-- **Persistent volumes** — attach org-scoped ext4 volumes that survive sandbox deletion and reattach to later sandboxes.
-- **Interactive PTY** — open a WebSocket shell backed by a real in-guest TTY over vsock on Firecracker.
-- **Ephemeral files & images** — drop inline files into a sandbox at boot, or build throwaway images that auto-expire.
+All snippets assume a client has already been created:
+
+```ts
+import { Client } from "@mv37/workdir";
+const wd = new Client("https://api.workdir.dev", process.env.WORKDIR_API_KEY!);
+```
+
+```python
+from workdir import Client
+wd = Client("https://api.workdir.dev", api_key="sk_live_...")
+```
+
+#### Browser automation
+
+```ts
+const box = await wd.sandboxes.create({
+  image: "browser",
+  resources: { cpu: 2, memoryMb: 4096, diskGb: 16 },
+  browser: { enabled: true, vnc: true, cdp: true },
+});
+console.log(box.urls.vnc, box.urls.cdp);
+console.log(await box.browser());
+```
+
+```python
+box = wd.sandboxes.create(
+    image="browser",
+    resources={"cpu": 2, "memory_mb": 4096, "disk_gb": 16},
+    browser={"enabled": True, "vnc": True, "cdp": True},
+)
+print(box.urls["vnc"], box.urls["cdp"])
+print(box.browser())
+```
+
+#### Secrets and coding agents
+
+```ts
+await wd.secrets.set("ANTHROPIC_API_KEY", process.env.ANTHROPIC_API_KEY!);
+const box = await wd.sandboxes.create({
+  codingAgent: { enabled: true },
+  startup: { secrets: ["ANTHROPIC_API_KEY"] },
+});
+await box.exec("opencode run 'add a regression test'");
+```
+
+```python
+wd.secrets.set("ANTHROPIC_API_KEY", "sk-ant-...")
+box = wd.sandboxes.create(
+    coding_agent={"enabled": True},
+    startup={"secrets": ["ANTHROPIC_API_KEY"]},
+)
+box.exec("opencode run 'add a regression test'")
+```
+
+#### Network egress policy
+
+```ts
+const box = await wd.sandboxes.create({
+  startup: {
+    network: {
+      egress: "allowlist",
+      allow: [
+        { type: "domain", value: "api.openai.com", protocol: "tcp", ports: [443] },
+        "93.184.216.34",
+      ],
+    },
+  },
+});
+console.log(box.network);
+```
+
+```python
+box = wd.sandboxes.create(
+    startup={
+        "network": {
+            "egress": "denylist",
+            "deny": [{"type": "domain", "value": "*.example.net", "protocol": "tcp", "ports": [443]}],
+        }
+    }
+)
+print(box.network)
+```
+
+#### Docker-in-Docker
+
+```ts
+const box = await wd.sandboxes.create({
+  image: "custom/acme/dind",
+  resources: { cpu: 2, memoryMb: 4096, diskGb: 16 },
+  docker: { enabled: true },
+});
+console.log((await box.exec("docker run --rm hello-world")).stdout);
+```
+
+```python
+box = wd.sandboxes.create(
+    image="custom/acme/dind",
+    resources={"cpu": 2, "memory_mb": 4096, "disk_gb": 16},
+    docker={"enabled": True},
+)
+print(box.exec("docker run --rm hello-world").stdout)
+```
+
+#### S3 mounts and inline files
+
+```ts
+await wd.secrets.set("AWS_ACCESS_KEY_ID", process.env.AWS_ACCESS_KEY_ID!);
+await wd.secrets.set("AWS_SECRET_ACCESS_KEY", process.env.AWS_SECRET_ACCESS_KEY!);
+const box = await wd.sandboxes.create({
+  startup: { secrets: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] },
+  mounts: [{ type: "s3", bucket: "my-data", prefix: "datasets/", mount_path: "/mnt/data", read_only: true }],
+  files: [{ path: "config.json", content: JSON.stringify({ task: "train" }) }],
+});
+```
+
+```python
+wd.secrets.set("AWS_ACCESS_KEY_ID", "...")
+wd.secrets.set("AWS_SECRET_ACCESS_KEY", "...")
+box = wd.sandboxes.create(
+    startup={"secrets": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]},
+    mounts=[{"type": "s3", "bucket": "my-data", "prefix": "datasets/", "mount_path": "/mnt/data", "read_only": True}],
+    files=[{"path": "config.json", "content": '{"task":"train"}'}],
+)
+```
+
+#### Persistent volumes
+
+```ts
+const volume = await wd.volumes.create("project-cache", 20);
+const box = await wd.sandboxes.create({
+  volumes: [{ volume_id: volume.id, mount_path: "/mnt/project" }],
+});
+await box.exec("echo cached > /mnt/project/state.txt");
+await box.delete(); // volume remains
+```
+
+```python
+volume = wd.volumes.create("project-cache", 20)
+box = wd.sandboxes.create(volumes=[{"volume_id": volume["id"], "mount_path": "/mnt/project"}])
+box.exec("echo cached > /mnt/project/state.txt")
+box.delete()  # volume remains
+```
+
+#### Custom and ephemeral images
+
+```ts
+const image = await wd.images.create(
+  "custom/acme/app",
+  { type: "dockerfile", context_url: "https://github.com/acme/app/archive/main.tar.gz", dockerfile: "Dockerfile" },
+  { cpu: 2, memory_mb: 4096, disk_gb: 16 },
+);
+const throwaway = await wd.images.create("custom/acme/one-shot", {
+  type: "oci",
+  image_ref: "ghcr.io/acme/app:sha",
+}, undefined, { ephemeral: true, ttl_seconds: 3600 });
+```
+
+```python
+image = wd.images.create(
+    "custom/acme/app",
+    {"type": "dockerfile", "context_url": "https://github.com/acme/app/archive/main.tar.gz", "dockerfile": "Dockerfile"},
+    {"cpu": 2, "memory_mb": 4096, "disk_gb": 16},
+)
+throwaway = wd.images.create(
+    "custom/acme/one-shot",
+    {"type": "oci", "image_ref": "ghcr.io/acme/app:sha"},
+    ephemeral=True,
+    ttl_seconds=3600,
+)
+```
+
+#### Lifecycle, fork, metrics, and PTY
+
+```ts
+await box.pause();
+await box.resume();
+const child = await box.fork();
+console.log(await child.metrics());
+
+import WebSocket from "ws";
+const pty = new WebSocket(
+  `wss://api.workdir.dev/v1/sandboxes/${box.id}/pty`,
+  { headers: { Authorization: `Bearer ${process.env.WORKDIR_API_KEY}` } },
+);
+```
+
+```python
+box.pause()
+box.resume()
+child = box.fork()
+print(child.metrics())
+
+# PTY is a WebSocket endpoint:
+# wss://api.workdir.dev/v1/sandboxes/<sandbox-id>/pty
+# Send Authorization: Bearer sk_live_... from your WebSocket client.
+```
 
 Full reference: **[docs/FEATURES.md](docs/FEATURES.md)** and **[docs/API.md](docs/API.md)**.
 

@@ -235,7 +235,7 @@ impl NetworkRule {
         if self.value.trim().is_empty() {
             return Err("network rule value cannot be empty".into());
         }
-        if self.ports.iter().any(|p| *p == 0) {
+        if self.ports.contains(&0) {
             return Err(format!("network rule '{}' has invalid port 0", self.value));
         }
         match self.kind {

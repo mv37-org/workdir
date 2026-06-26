@@ -1,9 +1,9 @@
 # Extended Features
 
 Capabilities added on top of the base spec: secret management, docker-in-docker,
-S3 bucket mounts, ephemeral files/images, coding agent, and persistent volumes.
-All are opt-in and preserve the cheap default path (a no-option `create()` is
-unchanged).
+S3 bucket mounts, ephemeral files/images, coding agent, persistent volumes, and
+create-time network egress controls. All are opt-in and preserve the cheap
+default path (a no-option `create()` is unchanged).
 
 ---
 
@@ -228,6 +228,49 @@ is configured before VM start, and fork is refused while volumes are attached.
 
 ---
 
+## 7. Network egress controls
+
+Attach a create-time egress policy to a sandbox under `startup.network`.
+Omitting it keeps the backward-compatible default internet egress.
+
+```jsonc
+{
+  "startup": {
+    "network": {
+      "egress": "allowlist",
+      "allow": [
+        { "type": "domain", "value": "api.openai.com", "protocol": "tcp", "ports": [443] },
+        { "type": "cidr", "value": "93.184.216.34/32", "protocol": "tcp", "ports": [443] }
+      ]
+    }
+  }
+}
+```
+
+Modes:
+
+| Mode | Meaning |
+|---|---|
+| `default` | Default internet egress with baseline metadata/private/SMTP blocks. |
+| `none` | Drop all forwarded sandbox egress. |
+| `allowlist` | Permit only listed CIDR/IP/domain rules. |
+| `denylist` | Drop listed CIDR/IP/domain rules and allow the rest. |
+
+Rules can be object form or simple strings (`"api.example.com"`,
+`"93.184.216.34"`, `"203.0.113.0/24"`). Domain policies use the host DNS proxy
+and dynamic nftables sets, and alternate DNS is blocked for explicit domain
+policies. URLs, paths, raw wildcards, invalid ports, IPv6 rules, and private or
+metadata allowlist ranges are rejected at create time.
+
+Hard-deny safety boundaries remain unreachable even if listed: metadata,
+link-local, sandbox CIDR, RFC1918/private ranges, IPv6 forwarding, and outbound
+SMTP.
+
+> The dev (`mock`) runtime persists and reports the policy but does not install
+> nftables rules. Real enforcement happens on the Firecracker runtime.
+
+---
+
 ## Create request — full option surface
 
 ```jsonc
@@ -245,7 +288,7 @@ is configured before VM start, and fork is refused while volumes are attached.
   "volumes": [{ "volume_id": "vol_...", "mount_path": "/mnt/project" }],
   "files":   [{ "path": "...", "content": "...", "encoding": "utf8|base64" }],
   "startup": { "git": {...}, "env": {...}, "secrets": [...], "commands": [...],
-               "ports": [...], "ready": {...} }
+               "ports": [...], "ready": {...}, "network": { "egress": "default|none|allowlist|denylist" } }
 }
 ```
 
