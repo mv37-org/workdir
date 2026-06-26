@@ -152,18 +152,31 @@ else
   cat > /etc/nftables.d/sandbox-nat.nft <<'NFT'
 table inet sandboxd {
     define SANDBOX_NET = 10.200.0.0/16
+    define HOST_DNS = 10.200.0.1
     define METADATA_BLOCK = { 169.254.169.254, 169.254.0.0/16, 100.100.100.200 }
     chain forward {
         type filter hook forward priority filter; policy drop;
         ct state established,related accept
+        meta nfproto ipv6 drop
+        ip saddr $SANDBOX_NET ip daddr $SANDBOX_NET drop
         ip saddr $SANDBOX_NET ip daddr $METADATA_BLOCK drop
         ip saddr $SANDBOX_NET tcp dport {25, 465, 587} drop
-        ip saddr $SANDBOX_NET ip daddr {10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16} tcp dport != 53 drop
+        ip saddr $SANDBOX_NET ip daddr {10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8} drop
+        ip saddr $SANDBOX_NET ct state new meter wd_newconn { ip saddr limit rate over 80/second } drop
+        jump sandbox_policy
         ip saddr $SANDBOX_NET accept
+    }
+    chain sandbox_policy {
     }
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
         ip saddr $SANDBOX_NET oifname != "lo" masquerade
+    }
+    chain input {
+        type filter hook input priority filter; policy accept;
+        ip saddr $SANDBOX_NET ip daddr $HOST_DNS udp dport 53 accept
+        ip saddr $SANDBOX_NET ip daddr $HOST_DNS tcp dport 53 accept
+        ip saddr $SANDBOX_NET tcp dport != {8080} ct state new accept
     }
 }
 NFT
@@ -208,7 +221,7 @@ Wants=network-online.target
 Type=simple
 User=workdir
 Group=workdir
-AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_MKNOD CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_ADMIN CAP_SETUID CAP_SETGID CAP_MKNOD CAP_DAC_OVERRIDE
 Environment=WORKDIR_CONFIG=/etc/workdir/config.toml
 Environment=RUST_LOG=info,sandboxd=info
 ExecStart=/usr/local/bin/workdir serve

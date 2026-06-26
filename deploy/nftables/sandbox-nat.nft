@@ -1,9 +1,9 @@
 # sandboxd network policy (spec §16, §18).
 #
-# Each sandbox gets a private IP on a per-VM tap in the 10.200.0.0/16 range, NAT
-# egress through the host, NO inbound public IP, blocked cloud metadata IPs, and
-# blocked outbound SMTP by default. Per-sandbox allow/deny rules are programmed
-# dynamically by the host agent on top of this base policy.
+# Each sandbox gets a private IP on a per-VM tap in the 10.200.0.0/16 range,
+# NAT egress through the host, NO inbound public IP, blocked cloud metadata IPs,
+# blocked private ranges, blocked outbound SMTP, IPv6-forward drop, and optional
+# per-sandbox egress rules programmed dynamically by the host agent.
 #
 # Apply with:  nft -f /etc/nftables.d/sandbox-nat.nft
 # Persist via /etc/nftables.conf `include "/etc/nftables.d/*.nft"`.
@@ -11,6 +11,7 @@
 table inet sandboxd {
     # Sandboxes live on this private supernet; one /30 (or tap) per microVM.
     define SANDBOX_NET = 10.200.0.0/16
+    define HOST_DNS = 10.200.0.1
 
     # Cloud metadata + link-local that must never be reachable from a sandbox.
     define METADATA_BLOCK = {
@@ -25,19 +26,36 @@ table inet sandboxd {
         # Established/related return traffic.
         ct state established,related accept
 
+        # No IPv6 egress in v1; policies are IPv4-only and must not be bypassed.
+        meta nfproto ipv6 drop
+
+        # No sandbox-to-sandbox traffic (bridge ports are isolated too).
+        ip saddr $SANDBOX_NET ip daddr $SANDBOX_NET drop
+
         # Block sandbox -> cloud metadata (SSRF / credential theft).
         ip saddr $SANDBOX_NET ip daddr $METADATA_BLOCK drop
 
         # Block outbound SMTP by default (spam abuse).
         ip saddr $SANDBOX_NET tcp dport {25, 465, 587} drop
 
-        # Block sandbox -> host private ranges except DNS to the host resolver.
-        ip saddr $SANDBOX_NET ip daddr {10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16} \
-            tcp dport != 53 drop
+        # Block sandbox -> private/internal networks. DNS to HOST_DNS is local
+        # input traffic, not forwarded traffic, so this does not block the
+        # controlled DNS proxy.
+        ip saddr $SANDBOX_NET ip daddr {10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8} drop
+
+        # Blunt port scanners / connection floods per guest.
+        ip saddr $SANDBOX_NET ct state new meter wd_newconn { ip saddr limit rate over 80/second } drop
+
+        # Per-sandbox egress policy jumps are inserted here by the workdir
+        # daemon. Empty chain means backward-compatible default egress.
+        jump sandbox_policy
 
         # Default-allow egress to the internet (overridden per-sandbox by the
         # host agent's allow/deny chains for allowlist/denylist policies).
         ip saddr $SANDBOX_NET accept
+    }
+
+    chain sandbox_policy {
     }
 
     chain postrouting {
@@ -48,6 +66,9 @@ table inet sandboxd {
 
     chain input {
         type filter hook input priority filter; policy accept;
+        # Domain policies use the host-side DNS proxy.
+        ip saddr $SANDBOX_NET ip daddr $HOST_DNS udp dport 53 accept
+        ip saddr $SANDBOX_NET ip daddr $HOST_DNS tcp dport 53 accept
         # No inbound public IP per sandbox: preview/VNC arrive only via the
         # authenticated proxy on the host, never directly to a sandbox.
         ip saddr $SANDBOX_NET tcp dport != {8080} ct state new accept

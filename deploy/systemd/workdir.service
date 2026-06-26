@@ -10,7 +10,8 @@ Type=simple
 # production provisioner) needs to chroot + drop each microVM to its own
 # per-VM uid/gid. Each Firecracker process then runs UNPRIVILEGED and jailed —
 # the daemon is root, the VMMs are not. With use_jailer=false you can instead
-# run User=workdir (+ SupplementaryGroups=kvm, AmbientCapabilities=CAP_NET_ADMIN).
+# run User=workdir (+ SupplementaryGroups=kvm, AmbientCapabilities=CAP_NET_ADMIN
+# CAP_NET_BIND_SERVICE for the sandbox DNS proxy).
 User=root
 Environment=WORKDIR_CONFIG=/etc/workdir/config.toml
 Environment=RUST_LOG=info,sandboxd=info

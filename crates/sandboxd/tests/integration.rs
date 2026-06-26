@@ -222,6 +222,79 @@ async fn concurrent_resume_does_not_double_bill() {
 }
 
 #[tokio::test]
+async fn network_policy_validates_persists_and_forks() {
+    let (base, key, _tmp) = spawn_server().await;
+    let c = client();
+    let auth = format!("Bearer {key}");
+
+    let bad = c
+        .post(format!("{base}/v1/sandboxes"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({
+            "startup": {
+                "network": {
+                    "egress": "allowlist",
+                    "allow": [{ "type": "domain", "value": "*" }]
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400, "unsafe wildcard must be rejected");
+
+    let parent: serde_json::Value = c
+        .post(format!("{base}/v1/sandboxes"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({
+            "startup": {
+                "network": {
+                    "egress": "allowlist",
+                    "allow": [
+                        { "type": "domain", "value": "*.example.com", "protocol": "tcp", "ports": [443] },
+                        "93.184.216.34"
+                    ]
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap();
+    assert_eq!(parent["network"]["egress"], "allowlist");
+    assert_eq!(parent["network"]["allow"][0]["type"], "domain");
+    assert_eq!(parent["network"]["allow"][1]["type"], "cidr");
+
+    let fetched: serde_json::Value = c
+        .get(format!("{base}/v1/sandboxes/{parent_id}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(fetched["network"], parent["network"]);
+
+    let child: serde_json::Value = c
+        .post(format!("{base}/v1/sandboxes/{parent_id}/fork"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        child["network"], parent["network"],
+        "forked children must inherit the parent's egress policy"
+    );
+}
+
+#[tokio::test]
 async fn secrets_inject_and_snapshot_is_refused() {
     let (base, key, _tmp) = spawn_server().await;
     let c = client();

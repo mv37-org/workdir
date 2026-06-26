@@ -51,8 +51,9 @@ sudo bash deploy/provision-node.sh
 4. **User + dirs** — `workdir` system user; `/var/lib/workdir/{kernel,images,workspaces}`; `workdir` added to the `kvm` group.
 5. **Guest kernel** — Firecracker CI `vmlinux` 6.1.x → `/var/lib/workdir/kernel/vmlinux`.
 6. **Networking** — bridge `wdbr0` (10.200.0.1/16), `ip_forward`, nftables NAT
-   masquerade for 10.200.0.0/16, metadata + SMTP egress blocks; persisted as
-   `workdir-net.service`. Sets ufw `DEFAULT_FORWARD_POLICY=ACCEPT`.
+   masquerade for 10.200.0.0/16, metadata/private/SMTP/IPv6 egress blocks, and
+   the dynamic `sandbox_policy` chain for create-time egress controls; persisted
+   as `workdir-net.service`. Sets ufw `DEFAULT_FORWARD_POLICY=ACCEPT`.
 7. **Build** — `cargo build --release`; installs `workdir` + `sandbox-guest-agent`.
 8. **Base image** — `deploy/build-image.sh base`; copies it to `node-python`.
 9. **Config + service** — `/etc/workdir/config.toml` (firecracker, hot pools on),
@@ -86,8 +87,10 @@ the kernel cmdline (`wd.ip`/`wd.gw`/`wd.dns` injected by the daemon), writes
 ## 3. Networking model
 
 Each microVM gets a host tap (`wdtapN`) attached to bridge `wdbr0`. The guest is
-`10.200.0.<n>/16`, gateway `10.200.0.1` (the bridge), DNS `1.1.1.1`. Egress is
-NAT-masqueraded out the uplink. Cloud-metadata IPs and outbound SMTP are dropped.
+`10.200.0.<n>/16`, gateway `10.200.0.1` (the bridge), DNS `1.1.1.1` by default
+or the host DNS proxy (`10.200.0.1`) when a domain egress policy is configured.
+Egress is NAT-masqueraded out the uplink. Cloud-metadata IPs, private/internal
+ranges, IPv6 forwarding, and outbound SMTP are dropped.
 
 **Tenant isolation & abuse controls** (in the nftables `forward` chain +
 firecracker tap setup):
@@ -96,6 +99,9 @@ firecracker tap setup):
   `10.200/16 → 10.200/16 drop`.
 - New outbound connections are **rate-limited per guest** (`meter wd_newconn`,
   80/s) to blunt port scanners / connection floods.
+- Create-time `startup.network` policies are enforced by host nftables rules
+  keyed by guest IP/tap. Domain rules use the daemon DNS proxy and dynamic nft
+  sets; alternate DNS is blocked for those explicit policies.
 - Operator kill switch: `POST /v1/admin/orgs/:org/suspend` (stops the org's
   sandboxes + blocks creates) and `…/unsuspend`. The bootstrap admin org can't
   be suspended, and admin keys are never locked out by suspension.
