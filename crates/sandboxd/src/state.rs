@@ -30,7 +30,14 @@ impl Inner {
     pub fn preview_url(&self, sandbox_id: &str, port: u16) -> String {
         let https = self.cfg.server.public_https;
         let scheme = if https { "https" } else { "http" };
-        let host = format!("{sandbox_id}-{port}.{}", self.cfg.server.public_domain);
+        // Preview hosts must be valid DNS labels so a per-host TLS cert can be
+        // issued on demand: public ACME CAs (Let's Encrypt/ZeroSSL) reject
+        // underscores. Render the id's `_` as `-` (e.g. `sbx_ab12` -> `sbx-ab12`);
+        // the host-routed proxy maps it back to the canonical id in
+        // `parse_preview_label`. The hex id body has no `-`/`_`, so this is
+        // unambiguous and reversible.
+        let host_id = sandbox_id.replace('_', "-");
+        let host = format!("{host_id}-{port}.{}", self.cfg.server.public_domain);
         let default_port = if https { 443 } else { 80 };
         match self.cfg.server.public_port {
             Some(p) if p != default_port => format!("{scheme}://{host}:{p}"),
