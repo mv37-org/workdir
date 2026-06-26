@@ -24,7 +24,7 @@ use super::{
 };
 use crate::config::RuntimeConfig;
 use crate::ids;
-use crate::model::BootPath;
+use crate::model::{BootPath, NetworkPolicy};
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -69,6 +69,10 @@ fn jail_guest_path(path: &str) -> Result<String> {
 
 #[derive(Serialize, Deserialize)]
 struct VmRecord {
+    /// Public sandbox id currently owning this VM. Warm-pool handles are not
+    /// renamed when claimed, so policy cleanup cannot derive this from `handle`.
+    #[serde(default)]
+    sandbox_id: String,
     /// Firecracker API control socket.
     api_sock: PathBuf,
     /// Host-side Unix socket that fronts the guest's vsock.
@@ -89,6 +93,9 @@ struct VmRecord {
     tap_idx: Option<u32>,
     /// Guest IP (on the bridge) the preview proxy dials for HTTP/VNC/CDP.
     guest_ip: Option<String>,
+    /// Host-enforced egress policy to reapply after standby/restore.
+    #[serde(default)]
+    network: NetworkPolicy,
     /// Env applied to every exec: startup env + injected secrets. Kept in host
     /// memory and passed per-exec so secrets never persist to a guest env file
     /// or land in a snapshot (review M3).
@@ -874,6 +881,7 @@ impl FirecrackerRuntime {
         self.vms.lock().unwrap().insert(
             handle.clone(),
             VmRecord {
+                sandbox_id: spec.sandbox_id.clone(),
                 api_sock: api_sock.clone(),
                 vsock_uds: vsock_uds.clone(),
                 vsock_fc: vsock_fc.clone(),
@@ -883,6 +891,7 @@ impl FirecrackerRuntime {
                 tap: Some(tap.clone()),
                 tap_idx: Some(tap_idx),
                 guest_ip: Some(guest_ip.clone()),
+                network: spec.network.clone(),
                 resident_env: Default::default(),
                 has_secrets: false,
                 standby: false,
@@ -1041,6 +1050,19 @@ impl FirecrackerRuntime {
             }
         }
 
+        if spec.network.uses_domain_rules() {
+            let cmd = format!(
+                "printf 'nameserver {}\\n' > /etc/resolv.conf",
+                crate::egress::DNS_PROXY_IP
+            );
+            self.agent_call(
+                handle,
+                &json!({"op": "exec", "cmd": cmd, "background": false}),
+            )
+            .await
+            .context("configure sandbox DNS proxy")?;
+        }
+
         // Mount persistent volumes first — inline files and startup commands may
         // target paths inside them. Prefer mount-by-label (stable across device
         // renumbering); fall back to the positional virtio path (/dev/vd{b+i},
@@ -1175,6 +1197,35 @@ impl FirecrackerRuntime {
         Ok(agent_ms)
     }
 
+    async fn apply_network_policy(&self, handle: &str, spec: &VmSpec) -> Result<()> {
+        let (guest_ip, previous_owner) = {
+            let vms = self.vms.lock().unwrap();
+            let v = vms
+                .get(handle)
+                .ok_or_else(|| anyhow!("unknown vm {handle}"))?;
+            (
+                v.guest_ip
+                    .clone()
+                    .ok_or_else(|| anyhow!("vm {handle} has no guest IP for egress policy"))?,
+                v.sandbox_id.clone(),
+            )
+        };
+        if !previous_owner.is_empty() && previous_owner != spec.sandbox_id {
+            let _ = crate::egress::clear_policy(&previous_owner).await;
+        }
+        {
+            let mut vms = self.vms.lock().unwrap();
+            if let Some(v) = vms.get_mut(handle) {
+                v.sandbox_id = spec.sandbox_id.clone();
+                v.network = spec.network.clone();
+            }
+        }
+        self.persist_record(handle);
+        crate::egress::apply_policy(&spec.sandbox_id, &guest_ip, &spec.network)
+            .await
+            .with_context(|| format!("apply egress policy for {}", spec.sandbox_id))
+    }
+
     /// Kill a VM's jailer process and reclaim its jail dir + workspace + record.
     async fn kill_and_reclaim(&self, handle: &str, pid: Option<u32>, jail: &std::path::Path) {
         if let Some(pid) = pid {
@@ -1183,8 +1234,13 @@ impl FirecrackerRuntime {
                 .status()
                 .await;
         }
-        let tap = self.vms.lock().unwrap().remove(handle).and_then(|r| r.tap);
-        if let Some(tap) = tap {
+        let removed = self.vms.lock().unwrap().remove(handle);
+        if let Some(r) = &removed {
+            if !r.sandbox_id.is_empty() {
+                let _ = crate::egress::clear_policy(&r.sandbox_id).await;
+            }
+        }
+        if let Some(tap) = removed.and_then(|r| r.tap) {
             let _ = run_ip(&["link", "del", &tap]).await;
         }
         let _ = std::fs::remove_dir_all(jail);
@@ -1479,6 +1535,7 @@ impl FirecrackerRuntime {
         self.vms.lock().unwrap().insert(
             handle.clone(),
             VmRecord {
+                sandbox_id: spec.sandbox_id.clone(),
                 api_sock: chroot_root.join("api.sock"),
                 vsock_uds: chroot_root.join("vsock.sock"),
                 vsock_fc: "vsock.sock".into(),
@@ -1488,6 +1545,7 @@ impl FirecrackerRuntime {
                 tap: Some(tap.clone()),
                 tap_idx: Some(tap_idx),
                 guest_ip: Some(ip.clone()),
+                network: spec.network.clone(),
                 resident_env: Default::default(),
                 has_secrets: false,
                 standby: false,
@@ -1864,9 +1922,22 @@ impl Runtime for FirecrackerRuntime {
             (handle, BootPath::ColdBoot, boot_ms)
         };
 
-        // Apply secrets/env, inline files, the coding agent, docker, and mounts to
-        // whichever VM we ended up with (warm or freshly booted).
-        let coding_agent_ms = self.apply_features(&handle, spec).await?;
+        // Apply host egress policy before any network-dependent guest feature
+        // (agent install, mounts, startup commands) can run. If anything in the
+        // post-boot attach path fails, reclaim the VM instead of leaking a live
+        // microVM behind a failed create.
+        let coding_agent_ms = match async {
+            self.apply_network_policy(&handle, spec).await?;
+            self.apply_features(&handle, spec).await
+        }
+        .await
+        {
+            Ok(ms) => ms,
+            Err(e) => {
+                let _ = self.delete(&handle).await;
+                return Err(e);
+            }
+        };
 
         let browser_ready_ms = if spec.browser.as_ref().map(|b| b.enabled).unwrap_or(false) {
             let start = Instant::now();
@@ -2105,7 +2176,7 @@ impl Runtime for FirecrackerRuntime {
         // the Firecracker process so its guest RAM returns to the host, and tear
         // down the tap. The record is kept (snapshot artifacts + NIC identity) so
         // `restore` can bring the exact same VM back.
-        let (sock, jail, pid, tap, has_secrets, snapshotted) = {
+        let (sock, jail, pid, tap, sandbox_id, has_secrets, snapshotted) = {
             let vms = self.vms.lock().unwrap();
             let v = vms
                 .get(handle)
@@ -2115,6 +2186,7 @@ impl Runtime for FirecrackerRuntime {
                 v.api_sock.parent().unwrap().to_path_buf(),
                 v.pid,
                 v.tap.clone(),
+                v.sandbox_id.clone(),
                 v.has_secrets,
                 v.snapshotted,
             )
@@ -2139,6 +2211,9 @@ impl Runtime for FirecrackerRuntime {
         }
         // Reclaim the tap too; `restore` recreates it (the bug the roadmap calls
         // out: a resumed VM must get its host networking back).
+        if !sandbox_id.is_empty() {
+            let _ = crate::egress::clear_policy(&sandbox_id).await;
+        }
         if let Some(tap) = &tap {
             let _ = run_ip(&["link", "del", tap]).await;
         }
@@ -2159,7 +2234,7 @@ impl Runtime for FirecrackerRuntime {
         // snapshot, and wait for the guest agent. After a control-plane restart
         // the in-memory record is gone, so rehydrate it from disk first.
         self.ensure_record_loaded(handle);
-        let (api_sock, jail, vsock_uds, tap, tap_idx, volumes, image_key) = {
+        let (api_sock, jail, vsock_uds, tap, tap_idx, guest_ip_record, volumes, image_key, sandbox_id, network) = {
             let vms = self.vms.lock().unwrap();
             let v = vms
                 .get(handle)
@@ -2170,8 +2245,11 @@ impl Runtime for FirecrackerRuntime {
                 v.vsock_uds.clone(),
                 v.tap.clone(),
                 v.tap_idx,
+                v.guest_ip.clone(),
                 v.volumes.clone(),
                 v.image_key.clone(),
+                v.sandbox_id.clone(),
+                v.network.clone(),
             )
         };
         let start = Instant::now();
@@ -2183,6 +2261,14 @@ impl Runtime for FirecrackerRuntime {
             if !tap_exists(tap) {
                 setup_tap(tap).await.context("recreate tap on restore")?;
             }
+        }
+        if !sandbox_id.is_empty() {
+            let ip = guest_ip_record
+                .or_else(|| tap_idx.map(guest_ip))
+                .ok_or_else(|| anyhow!("restore has no guest IP for egress policy"))?;
+            crate::egress::apply_policy(&sandbox_id, &ip, &network)
+                .await
+                .with_context(|| format!("reapply egress policy for {sandbox_id}"))?;
         }
 
         // Jailer restore: relaunch under the jailer in a FRESH chroot (the jailer
@@ -2602,10 +2688,12 @@ impl Runtime for FirecrackerRuntime {
                 vsock_fc: "vsock.sock".to_string(),
                 cid,
                 pid,
+                sandbox_id: child_spec.sandbox_id.clone(),
                 image_key: parent_image,
                 tap: Some(tap),
                 tap_idx: Some(tap_idx),
                 guest_ip: Some(child_ip.clone()),
+                network: child_spec.network.clone(),
                 resident_env: Default::default(),
                 has_secrets: false,
                 standby: false,
@@ -2634,8 +2722,19 @@ impl Runtime for FirecrackerRuntime {
             ),
             "background": false,
         })).await;
-        // Apply the child's own env/files/agent/mounts on top of the inherited state.
-        let agent_ms = self.apply_features(&child, child_spec).await?;
+        // Apply the child's host egress policy before its own feature setup runs.
+        let agent_ms = match async {
+            self.apply_network_policy(&child, child_spec).await?;
+            self.apply_features(&child, child_spec).await
+        }
+        .await
+        {
+            Ok(ms) => ms,
+            Err(e) => {
+                let _ = self.delete(&child).await;
+                return Err(e);
+            }
+        };
 
         Ok(VmInstance {
             handle: child,
@@ -2654,6 +2753,9 @@ impl Runtime for FirecrackerRuntime {
         // (chroot_base/firecracker/<id>) so restores don't leak chroots.
         let mut active_chroot: Option<PathBuf> = None;
         if let Some(r) = record {
+            if !r.sandbox_id.is_empty() {
+                let _ = crate::egress::clear_policy(&r.sandbox_id).await;
+            }
             if let Some(pid) = r.pid {
                 // SIGKILL Firecracker; it tears the VM down with it.
                 let _ = tokio::process::Command::new("kill")
@@ -2834,6 +2936,7 @@ mod tests {
     fn standby_record(chroot_base: &Path, jail_id: &str, tap_idx: u32, cid: u32) -> VmRecord {
         let chroot_root = chroot_base.join("firecracker").join(jail_id).join("root");
         VmRecord {
+            sandbox_id: "sb_test".into(),
             api_sock: chroot_root.join("api.sock"),
             vsock_uds: chroot_root.join("vsock.sock"),
             vsock_fc: "vsock.sock".into(),
@@ -2843,6 +2946,7 @@ mod tests {
             tap: Some(format!("wdtap{tap_idx}")),
             tap_idx: Some(tap_idx),
             guest_ip: Some(guest_ip(tap_idx)),
+            network: Default::default(),
             resident_env: Default::default(),
             has_secrets: false,
             standby: true,

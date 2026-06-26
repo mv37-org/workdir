@@ -152,6 +152,11 @@ pub async fn build_state(cfg: Config) -> Result<crate::state::AppState> {
         other => anyhow::bail!("unknown runtime kind '{other}' (use 'mock' or 'firecracker')"),
     };
     tracing::info!(runtime = runtime.kind(), "data-plane runtime selected");
+    if runtime.kind() == "firecracker" {
+        if let Err(e) = crate::egress::start_dns_proxy() {
+            tracing::warn!(error = %e, "sandbox egress DNS proxy is not ready; domain network policies will fail closed");
+        }
+    }
 
     // Resolve and register this node.
     let node_id = resolve_node_id(&store, &cfg)?;

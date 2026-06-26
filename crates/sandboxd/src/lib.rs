@@ -14,6 +14,7 @@ pub mod capacity;
 pub mod catalog;
 pub mod config;
 pub mod config_example;
+pub mod egress;
 pub mod error;
 pub mod host;
 pub mod hotpool;
