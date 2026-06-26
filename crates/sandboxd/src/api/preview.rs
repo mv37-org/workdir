@@ -61,12 +61,19 @@ pub async fn preview_host(State(state): State<AppState>, req: axum::extract::Req
 }
 
 fn parse_preview_label(label: &str) -> Option<(String, u16)> {
-    // `sbx_abcdef-3000` -> ("sbx_abcdef", 3000)
+    // Hostname-safe `sbx-abcdef-3000` (or legacy `sbx_abcdef-3000`) -> ("sbx_abcdef", 3000).
+    // `preview_url` renders the canonical id's `_` as `-` so each `<id>-<port>` host
+    // is a valid DNS label (public ACME CAs reject `_`); map it back here. The hex
+    // id body contains no `-`/`_`, so the leading `sbx-` is the only ambiguous one.
     let (id, port) = label.rsplit_once('-')?;
-    if !id.starts_with("sbx_") {
+    let id = if let Some(rest) = id.strip_prefix("sbx-") {
+        format!("sbx_{rest}")
+    } else if id.starts_with("sbx_") {
+        id.to_string()
+    } else {
         return None;
-    }
-    Some((id.to_string(), port.parse().ok()?))
+    };
+    Some((id, port.parse().ok()?))
 }
 
 /// Rebuild a query string with the `key=` preview token removed, so it is never
@@ -305,5 +312,32 @@ async fn bridge_ws(client: WebSocket, upstream_url: String) {
     tokio::select! {
         _ = client_to_upstream => {},
         _ = upstream_to_client => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_label_maps_hostname_safe_id_back_to_canonical() {
+        // Hostname-safe form (what `preview_url` now emits): `_` rendered as `-`.
+        assert_eq!(
+            parse_preview_label("sbx-ab12cd34ef56-3000"),
+            Some(("sbx_ab12cd34ef56".to_string(), 3000))
+        );
+        // Legacy underscore form still parses (path tools / older URLs).
+        assert_eq!(
+            parse_preview_label("sbx_ab12cd34ef56-8080"),
+            Some(("sbx_ab12cd34ef56".to_string(), 8080))
+        );
+        // VNC/CDP ports.
+        assert_eq!(
+            parse_preview_label("sbx-deadbeef0000-6080"),
+            Some(("sbx_deadbeef0000".to_string(), 6080))
+        );
+        // Non-sandbox labels (e.g. the `api` host) are not previews.
+        assert_eq!(parse_preview_label("api"), None);
+        assert_eq!(parse_preview_label("foo-3000"), None);
     }
 }
