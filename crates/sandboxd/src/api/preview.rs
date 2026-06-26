@@ -169,6 +169,13 @@ async fn do_preview(
     // Plain HTTP forward.
     let method = parts.method.clone();
     let headers = parts.headers.clone();
+    // If this request authenticated via ?key=, hand the browser a cookie so its
+    // sub-resource and WebSocket requests carry auth too (they can't add a query
+    // param or header). Only set it on the key-bearing navigation, not on the
+    // cookie-authenticated requests that follow.
+    let set_cookie = Query::<PreviewAuth>::try_from_uri(&parts.uri)
+        .ok()
+        .and_then(|q| q.0.key);
     let body_bytes = match axum::body::to_bytes(body, 16 * 1024 * 1024).await {
         Ok(b) => b,
         Err(_) => return (StatusCode::BAD_REQUEST, "body too large").into_response(),
@@ -180,6 +187,7 @@ async fn do_preview(
         upstream,
         &upstream_path,
         body_bytes.to_vec(),
+        set_cookie.as_deref(),
     )
     .await
 }
@@ -197,8 +205,48 @@ fn control_plane_port(state: &AppState) -> u16 {
         .unwrap_or(0)
 }
 
+/// Cookie that carries the preview key so a *browser* can load a full web app
+/// (e.g. noVNC, a dev server): the first `?key=` request sets it, then the
+/// browser sends it on every sub-resource (CSS/JS) and the WebSocket upgrade —
+/// none of which can carry a query param or Authorization header. It is
+/// HttpOnly + Secure, scoped to the per-sandbox preview host, and is stripped
+/// before any request reaches the (untrusted) sandbox.
+const PREVIEW_COOKIE: &str = "__wd_preview";
+
+/// Read the preview key from the `Cookie` header, if present.
+fn cookie_token(headers: &HeaderMap) -> Option<String> {
+    let cookies = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())?;
+    cookies.split(';').find_map(|part| {
+        part.trim()
+            .strip_prefix(PREVIEW_COOKIE)
+            .and_then(|r| r.strip_prefix('='))
+            .map(|v| v.to_string())
+    })
+}
+
+/// Remove the preview cookie from a `Cookie` header value, keeping any other
+/// cookies, so the untrusted upstream gets the app's own cookies but never the
+/// preview key.
+fn strip_preview_cookie(value: &str) -> String {
+    value
+        .split(';')
+        .map(|p| p.trim())
+        .filter(|p| {
+            !p.strip_prefix(PREVIEW_COOKIE)
+                .map(|r| r.starts_with('='))
+                .unwrap_or(false)
+        })
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn preview_authorized(state: &AppState, org_id: &str, req: &axum::extract::Request) -> bool {
-    // Bearer header or ?key= query, must belong to the sandbox org (or admin).
+    // Bearer header, ?key= query, or the preview cookie — must belong to the
+    // sandbox org (or admin). The cookie authenticates a browser's sub-resource
+    // requests after the initial ?key= navigation.
     let bearer = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
@@ -208,7 +256,7 @@ fn preview_authorized(state: &AppState, org_id: &str, req: &axum::extract::Reque
     let query_key = Query::<PreviewAuth>::try_from_uri(req.uri())
         .ok()
         .and_then(|q| q.0.key);
-    let token = bearer.or(query_key);
+    let token = bearer.or(query_key).or_else(|| cookie_token(req.headers()));
     match authenticate(&state.store, token.as_deref()) {
         AuthOutcome::Ok(ctx) => ctx.admin || ctx.org_id == org_id,
         _ => false,
@@ -222,12 +270,24 @@ async fn http_forward(
     upstream: std::net::SocketAddr,
     path: &str,
     body: Vec<u8>,
+    set_cookie: Option<&str>,
 ) -> Response {
     let url = format!("http://{upstream}{path}");
     let mut builder = state.http.request(method, &url);
     for (name, value) in headers.iter() {
         if is_hop_by_hop(name) || name == HOST {
             continue;
+        }
+        // Strip the preview auth cookie before it reaches the untrusted sandbox;
+        // forward only the app's own cookies (if any remain).
+        if name == axum::http::header::COOKIE {
+            if let Ok(v) = value.to_str() {
+                let kept = strip_preview_cookie(v);
+                if !kept.is_empty() {
+                    builder = builder.header(name, kept);
+                }
+                continue;
+            }
         }
         builder = builder.header(name, value);
     }
@@ -242,6 +302,14 @@ async fn http_forward(
             continue;
         }
         out = out.header(name, value);
+    }
+    if let Some(key) = set_cookie {
+        // HttpOnly: unreadable by sandbox JS. Secure: HTTPS only. SameSite=Strict
+        // + the per-sandbox host scope keep it off other origins/sandboxes.
+        out = out.header(
+            axum::http::header::SET_COOKIE,
+            format!("{PREVIEW_COOKIE}={key}; Path=/; Secure; HttpOnly; SameSite=Strict"),
+        );
     }
     let bytes = resp.bytes().await.unwrap_or_default();
     out.body(Body::from(bytes))
@@ -339,5 +407,35 @@ mod tests {
         // Non-sandbox labels (e.g. the `api` host) are not previews.
         assert_eq!(parse_preview_label("api"), None);
         assert_eq!(parse_preview_label("foo-3000"), None);
+    }
+
+    #[test]
+    fn cookie_token_reads_preview_cookie() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            axum::http::header::COOKIE,
+            "a=1; __wd_preview=sk_live_x; b=2".parse().unwrap(),
+        );
+        assert_eq!(cookie_token(&h), Some("sk_live_x".to_string()));
+
+        let mut none = HeaderMap::new();
+        none.insert(axum::http::header::COOKIE, "other=1".parse().unwrap());
+        assert_eq!(cookie_token(&none), None);
+        assert_eq!(cookie_token(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn strip_preview_cookie_removes_only_the_preview_key() {
+        // The secret is removed; the app's own cookies survive for the upstream.
+        assert_eq!(
+            strip_preview_cookie("a=1; __wd_preview=sk_live_x; b=2"),
+            "a=1; b=2"
+        );
+        assert_eq!(strip_preview_cookie("__wd_preview=sk_live_x"), "");
+        // A name that merely shares the prefix is NOT stripped.
+        assert_eq!(
+            strip_preview_cookie("__wd_preview_other=y"),
+            "__wd_preview_other=y"
+        );
     }
 }
