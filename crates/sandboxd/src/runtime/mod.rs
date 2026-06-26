@@ -12,7 +12,7 @@ pub mod mock;
 pub mod workspace;
 
 use crate::knobs::Resources;
-use crate::model::{BootPath, BrowserConfig, CodingAgentConfig, MountSpec};
+use crate::model::{BootPath, BrowserConfig, CodingAgentConfig, MountSpec, NetworkPolicy};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::BTreeMap;
@@ -46,6 +46,9 @@ pub struct VmSpec {
     pub volumes: Vec<crate::model::VolumeAttach>,
     /// Inline files to write into the workspace before startup commands run.
     pub files: Vec<(String, Vec<u8>)>,
+    /// Host-enforced network policy for the sandbox lifetime.
+    #[serde(default)]
+    pub network: NetworkPolicy,
 }
 
 /// A pre-booted warm microVM waiting in a hot pool.

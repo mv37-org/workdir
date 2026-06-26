@@ -4,7 +4,8 @@
 use crate::knobs::{Resources, ResourcesRequest};
 use crate::lifecycle::State;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::net::Ipv4Addr;
 
 /// Where a sandbox came from. The response MUST report this honestly so that
 /// best-case hot-pool numbers are never published unlabeled (spec §3.5, §21).
@@ -130,22 +131,350 @@ fn default_ready_timeout() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(PartialEq, Eq)]
 #[derive(Default)]
 pub enum EgressMode {
     #[default]
     Default,
     Allowlist,
     Denylist,
+    None,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NetworkPolicy {
     #[serde(default)]
     pub egress: EgressMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow: Vec<String>,
+    pub allow: Vec<NetworkRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deny: Vec<String>,
+    pub deny: Vec<NetworkRule>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkRuleKind {
+    Cidr,
+    Domain,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkProtocol {
+    Tcp,
+    Udp,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct NetworkRule {
+    #[serde(rename = "type")]
+    pub kind: NetworkRuleKind,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<NetworkProtocol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<u16>,
+}
+
+impl<'de> Deserialize<'de> for NetworkRule {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum WireRule {
+            Shorthand(String),
+            Object {
+                #[serde(rename = "type")]
+                kind: Option<NetworkRuleKind>,
+                value: String,
+                #[serde(default)]
+                protocol: Option<NetworkProtocol>,
+                #[serde(default)]
+                ports: Vec<u16>,
+            },
+        }
+
+        match WireRule::deserialize(deserializer)? {
+            WireRule::Shorthand(value) => Ok(NetworkRule::from_value(value)),
+            WireRule::Object {
+                kind,
+                value,
+                protocol,
+                ports,
+            } => {
+                let mut rule = NetworkRule::from_value(value);
+                if let Some(kind) = kind {
+                    rule.kind = kind;
+                }
+                rule.protocol = protocol;
+                rule.ports = ports;
+                Ok(rule)
+            }
+        }
+    }
+}
+
+impl NetworkRule {
+    fn from_value(value: String) -> NetworkRule {
+        let trimmed = value.trim().to_ascii_lowercase();
+        let kind = if parse_ipv4_cidr(&trimmed).is_some() {
+            NetworkRuleKind::Cidr
+        } else {
+            NetworkRuleKind::Domain
+        };
+        NetworkRule {
+            kind,
+            value: trimmed,
+            protocol: None,
+            ports: Vec::new(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.value.trim().is_empty() {
+            return Err("network rule value cannot be empty".into());
+        }
+        if self.ports.iter().any(|p| *p == 0) {
+            return Err(format!(
+                "network rule '{}' has invalid port 0",
+                self.value
+            ));
+        }
+        match self.kind {
+            NetworkRuleKind::Cidr => {
+                parse_ipv4_cidr(&self.value).ok_or_else(|| {
+                    format!(
+                        "network cidr rule '{}' must be an IPv4 address or CIDR",
+                        self.value
+                    )
+                })?;
+            }
+            NetworkRuleKind::Domain => validate_domain_pattern(&self.value)?,
+        }
+        Ok(())
+    }
+
+    pub fn is_domain(&self) -> bool {
+        matches!(self.kind, NetworkRuleKind::Domain)
+    }
+}
+
+impl NetworkPolicy {
+    pub fn validate(&self) -> Result<(), String> {
+        match self.egress {
+            EgressMode::Default => {
+                if !self.allow.is_empty() || !self.deny.is_empty() {
+                    return Err("network.egress=default cannot include allow or deny rules".into());
+                }
+            }
+            EgressMode::Allowlist => {
+                if self.allow.is_empty() {
+                    return Err("network.egress=allowlist requires at least one allow rule".into());
+                }
+                if !self.deny.is_empty() {
+                    return Err("network.egress=allowlist cannot include deny rules".into());
+                }
+            }
+            EgressMode::Denylist => {
+                if self.deny.is_empty() {
+                    return Err("network.egress=denylist requires at least one deny rule".into());
+                }
+                if !self.allow.is_empty() {
+                    return Err("network.egress=denylist cannot include allow rules".into());
+                }
+            }
+            EgressMode::None => {
+                if !self.allow.is_empty() || !self.deny.is_empty() {
+                    return Err("network.egress=none cannot include allow or deny rules".into());
+                }
+            }
+        }
+
+        for rule in self.allow.iter().chain(self.deny.iter()) {
+            rule.validate()?;
+        }
+        if matches!(self.egress, EgressMode::Allowlist) {
+            for rule in &self.allow {
+                if matches!(rule.kind, NetworkRuleKind::Cidr) && cidr_is_hard_denied(&rule.value) {
+                    return Err(format!(
+                        "network allow rule '{}' overlaps a hard-denied private or metadata range",
+                        rule.value
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn uses_domain_rules(&self) -> bool {
+        self.allow.iter().chain(self.deny.iter()).any(NetworkRule::is_domain)
+    }
+
+    pub fn rules_for_mode(&self) -> &[NetworkRule] {
+        match self.egress {
+            EgressMode::Allowlist => &self.allow,
+            EgressMode::Denylist => &self.deny,
+            EgressMode::Default | EgressMode::None => &[],
+        }
+    }
+}
+
+pub fn domain_matches(pattern: &str, domain: &str) -> bool {
+    let pattern = pattern.trim_end_matches('.').to_ascii_lowercase();
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        if !domain.ends_with(&format!(".{suffix}")) {
+            return false;
+        }
+        let prefix = &domain[..domain.len() - suffix.len() - 1];
+        return !prefix.is_empty() && !prefix.contains('.');
+    }
+    pattern == domain
+}
+
+fn validate_domain_pattern(value: &str) -> Result<(), String> {
+    if value.contains("://") || value.contains('/') || value.contains(':') {
+        return Err(format!(
+            "network domain rule '{value}' must be a hostname, not a URL"
+        ));
+    }
+    if value == "*" || value.starts_with("*.") && value.matches('*').count() > 1 {
+        return Err(format!(
+            "network domain rule '{value}' has an unsafe wildcard"
+        ));
+    }
+    if value.contains('*') && !value.starts_with("*.") {
+        return Err(format!(
+            "network domain rule '{value}' may only use a leading '*.' wildcard"
+        ));
+    }
+    let host = value.strip_prefix("*.").unwrap_or(value);
+    if host.len() > 253 || host.is_empty() || !host.contains('.') {
+        return Err(format!("network domain rule '{value}' is not a valid domain"));
+    }
+    for label in host.split('.') {
+        let bytes = label.as_bytes();
+        if bytes.is_empty() || bytes.len() > 63 {
+            return Err(format!("network domain rule '{value}' has an invalid label"));
+        }
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if first == b'-' || last == b'-' {
+            return Err(format!("network domain rule '{value}' has an invalid label"));
+        }
+        if !bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+        {
+            return Err(format!("network domain rule '{value}' has an invalid label"));
+        }
+    }
+    Ok(())
+}
+
+pub fn parse_ipv4_cidr(value: &str) -> Option<(Ipv4Addr, u8)> {
+    let (ip, prefix) = match value.split_once('/') {
+        Some((ip, prefix)) => (ip, prefix.parse::<u8>().ok()?),
+        None => (value, 32),
+    };
+    if prefix > 32 {
+        return None;
+    }
+    Some((ip.parse().ok()?, prefix))
+}
+
+fn cidr_is_hard_denied(value: &str) -> bool {
+    let Some((ip, prefix)) = parse_ipv4_cidr(value) else {
+        return false;
+    };
+    const HARD_DENY: &[(&str, u8)] = &[
+        ("10.0.0.0", 8),
+        ("172.16.0.0", 12),
+        ("192.168.0.0", 16),
+        ("127.0.0.0", 8),
+        ("169.254.0.0", 16),
+        ("100.100.100.200", 32),
+    ];
+    HARD_DENY.iter().any(|(net, hard_prefix)| {
+        let hard_ip: Ipv4Addr = net.parse().expect("hard-coded IPv4 range");
+        cidr_overlaps(ip, prefix, hard_ip, *hard_prefix)
+    })
+}
+
+fn cidr_overlaps(a: Ipv4Addr, a_prefix: u8, b: Ipv4Addr, b_prefix: u8) -> bool {
+    let prefix = a_prefix.min(b_prefix);
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    (u32::from(a) & mask) == (u32::from(b) & mask)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_rule_shorthand_infers_cidr_or_domain() {
+        let cidr: NetworkRule = serde_json::from_str("\"93.184.216.34\"").unwrap();
+        assert_eq!(cidr.kind, NetworkRuleKind::Cidr);
+        assert_eq!(cidr.value, "93.184.216.34");
+
+        let domain: NetworkRule = serde_json::from_str("\"API.OpenAI.com\"").unwrap();
+        assert_eq!(domain.kind, NetworkRuleKind::Domain);
+        assert_eq!(domain.value, "api.openai.com");
+    }
+
+    #[test]
+    fn network_policy_rejects_invalid_mode_shapes() {
+        let none_with_allow: NetworkPolicy = serde_json::from_value(serde_json::json!({
+            "egress": "none",
+            "allow": ["example.com"]
+        }))
+        .unwrap();
+        assert!(none_with_allow.validate().is_err());
+
+        let empty_allowlist: NetworkPolicy = serde_json::from_value(serde_json::json!({
+            "egress": "allowlist"
+        }))
+        .unwrap();
+        assert!(empty_allowlist.validate().is_err());
+    }
+
+    #[test]
+    fn network_policy_rejects_urls_and_unsafe_wildcards() {
+        for value in ["https://example.com", "example.com/path", "*", "api.*.com"] {
+            let policy: NetworkPolicy = serde_json::from_value(serde_json::json!({
+                "egress": "allowlist",
+                "allow": [{ "type": "domain", "value": value }]
+            }))
+            .unwrap();
+            assert!(policy.validate().is_err(), "{value} should be invalid");
+        }
+    }
+
+    #[test]
+    fn allowlist_rejects_private_or_metadata_cidrs() {
+        for value in ["10.0.0.0/8", "192.168.1.1", "169.254.169.254"] {
+            let policy: NetworkPolicy = serde_json::from_value(serde_json::json!({
+                "egress": "allowlist",
+                "allow": [{ "type": "cidr", "value": value }]
+            }))
+            .unwrap();
+            assert!(policy.validate().is_err(), "{value} should be hard-denied");
+        }
+    }
+
+    #[test]
+    fn domain_wildcards_match_one_label_only() {
+        assert!(domain_matches("*.example.com", "api.example.com"));
+        assert!(!domain_matches("*.example.com", "deep.api.example.com"));
+        assert!(!domain_matches("*.example.com", "example.com"));
+        assert!(domain_matches("api.example.com", "api.example.com."));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +689,9 @@ pub struct Sandbox {
     /// Persistent volumes attached to the guest (survive this sandbox's delete).
     #[serde(default)]
     pub volumes: Vec<VolumeAttach>,
+    /// Effective network policy enforced by the host runtime.
+    #[serde(default)]
+    pub network: NetworkPolicy,
     /// Preview ports exposed via the wildcard proxy.
     #[serde(default)]
     pub ports: Vec<u16>,

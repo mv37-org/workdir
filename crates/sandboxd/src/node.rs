@@ -172,6 +172,7 @@ impl LocalNode {
             mounts: Vec::new(),
             volumes: Vec::new(),
             files: Vec::new(),
+            network: Default::default(),
         }
     }
 

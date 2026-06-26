@@ -61,6 +61,7 @@ pub fn sandbox_view(state: &AppState, sb: &Sandbox) -> Value {
         "docker": sb.docker,
         "secret_names": sb.secret_names,
         "mounts": sb.mounts,
+        "network": sb.network,
     });
     // The runtime label reflects the actual data plane in use.
     v["runtime"] = Value::String(state.local.runtime_kind().to_string());

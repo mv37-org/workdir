@@ -54,6 +54,7 @@ fn bench_spec(image_key: &str, resources: Resources) -> VmSpec {
         mounts: Vec::new(),
         volumes: Vec::new(),
         files: Vec::new(),
+        network: Default::default(),
     }
 }
 

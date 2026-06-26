@@ -99,6 +99,11 @@ pub async fn create_sandbox(
 
     // --- features: secrets, files, mounts, docker -----------------------
     let startup = parse_startup(req.startup.clone())?;
+    let network = startup
+        .as_ref()
+        .map(|s| s.network.clone())
+        .unwrap_or_default();
+    network.validate().map_err(ApiError::BadRequest)?;
     let (secret_env, secret_names) = resolve_secrets(state, ctx, startup.as_ref())?;
     let files = build_ephemeral_files(req.files.as_deref())?;
     let mounts = req.mounts.clone().unwrap_or_default();
@@ -184,6 +189,7 @@ pub async fn create_sandbox(
         mounts: mounts.clone(),
         volumes: volumes.clone(),
         files,
+        network: network.clone(),
     };
 
     // --- persist a creating record, then boot ---------------------------
@@ -206,6 +212,7 @@ pub async fn create_sandbox(
         coding_agent: coding_agent_kind,
         mounts,
         volumes: volumes.clone(),
+        network,
         ports: vec![],
         runtime_handle: None,
         error: None,
@@ -1075,6 +1082,7 @@ pub async fn fork_sandbox(
         mounts: parent.mounts.clone(),
         volumes: vec![], // a fork sibling never shares the parent's exclusive volumes
         files: vec![],
+        network: parent.network.clone(),
     };
 
     let now = Utc::now();
@@ -1096,6 +1104,7 @@ pub async fn fork_sandbox(
         coding_agent: parent.coding_agent.clone(),
         mounts: parent.mounts.clone(),
         volumes: vec![],
+        network: parent.network.clone(),
         ports: vec![],
         runtime_handle: None,
         error: None,
