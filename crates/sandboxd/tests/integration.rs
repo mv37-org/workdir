@@ -124,7 +124,11 @@ async fn one_node_acceptance_flow() {
         .await
         .unwrap();
     let port: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(port["url"], format!("https://{id}-3000.test.local"));
+    let host_id = id.replace('_', "-");
+    assert_eq!(
+        port["url"],
+        format!("https://{host_id}-3000.test.local")
+    );
 
     // --- knob rejection: 13 GB memory ---
     let resp = c
