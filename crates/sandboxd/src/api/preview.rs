@@ -243,6 +243,14 @@ fn strip_preview_cookie(value: &str) -> String {
         .join("; ")
 }
 
+fn is_preview_set_cookie(value: &str) -> bool {
+    value
+        .trim_start()
+        .strip_prefix(PREVIEW_COOKIE)
+        .map(|r| r.starts_with('='))
+        .unwrap_or(false)
+}
+
 fn preview_authorized(state: &AppState, org_id: &str, req: &axum::extract::Request) -> bool {
     // Bearer header, ?key= query, or the preview cookie — must belong to the
     // sandbox org (or admin). The cookie authenticates a browser's sub-resource
@@ -299,6 +307,11 @@ async fn http_forward(
     let mut out = Response::builder().status(status);
     for (name, value) in resp.headers().iter() {
         if is_hop_by_hop(name) {
+            continue;
+        }
+        if name == axum::http::header::SET_COOKIE
+            && value.to_str().map(is_preview_set_cookie).unwrap_or(false)
+        {
             continue;
         }
         out = out.header(name, value);
@@ -437,5 +450,13 @@ mod tests {
             strip_preview_cookie("__wd_preview_other=y"),
             "__wd_preview_other=y"
         );
+    }
+
+    #[test]
+    fn set_cookie_filter_identifies_reserved_preview_cookie() {
+        assert!(is_preview_set_cookie("__wd_preview=bad; Path=/; HttpOnly"));
+        assert!(is_preview_set_cookie("   __wd_preview=bad; Path=/"));
+        assert!(!is_preview_set_cookie("__wd_preview_other=y; Path=/"));
+        assert!(!is_preview_set_cookie("session=ok; Path=/"));
     }
 }
