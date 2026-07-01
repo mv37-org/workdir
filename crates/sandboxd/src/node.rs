@@ -20,6 +20,23 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[derive(Debug, thiserror::Error)]
+pub enum NodeError {
+    #[error("file not found: {0}")]
+    FileNotFound(String),
+}
+
+pub fn file_not_found(path: impl Into<String>) -> anyhow::Error {
+    NodeError::FileNotFound(path.into()).into()
+}
+
+pub fn is_file_not_found(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<NodeError>(),
+        Some(NodeError::FileNotFound(_))
+    )
+}
+
 #[async_trait]
 pub trait NodeClient: Send + Sync {
     fn node_id(&self) -> &str;
