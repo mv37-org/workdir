@@ -342,7 +342,13 @@ impl Runtime for MockRuntime {
 
     async fn read_file(&self, handle: &str, path: &str) -> Result<Vec<u8>> {
         let p = self.workspaces.resolve(handle, path)?;
-        Ok(std::fs::read(&p)?)
+        std::fs::read(&p).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                crate::node::file_not_found(path)
+            } else {
+                e.into()
+            }
+        })
     }
 
     async fn list_dir(&self, handle: &str, path: &str) -> Result<Vec<DirEntry>> {

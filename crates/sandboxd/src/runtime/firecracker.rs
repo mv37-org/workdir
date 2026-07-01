@@ -654,10 +654,11 @@ impl FirecrackerRuntime {
         let resp: serde_json::Value =
             serde_json::from_slice(&buf).context("parse agent response")?;
         if resp.get("status").and_then(|s| s.as_str()) == Some("error") {
-            bail!(
-                "guest agent error: {}",
-                resp.get("message").and_then(|m| m.as_str()).unwrap_or("?")
-            );
+            let message = resp.get("message").and_then(|m| m.as_str()).unwrap_or("?");
+            if resp.get("code").and_then(|c| c.as_str()) == Some("not_found") {
+                return Err(crate::node::file_not_found(message));
+            }
+            bail!("guest agent error: {message}");
         }
         Ok(resp
             .get("result")

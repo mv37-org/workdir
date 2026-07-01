@@ -51,16 +51,39 @@ enum Request {
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum Response {
-    Ok { result: serde_json::Value },
-    Error { message: String },
+    Ok {
+        result: serde_json::Value,
+    },
+    Error {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<&'static str>,
+    },
+}
+
+fn error(message: impl Into<String>) -> Response {
+    Response::Error {
+        message: message.into(),
+        code: None,
+    }
+}
+
+fn io_error(e: std::io::Error) -> Response {
+    let code = if e.kind() == std::io::ErrorKind::NotFound {
+        Some("not_found")
+    } else {
+        None
+    };
+    Response::Error {
+        message: e.to_string(),
+        code,
+    }
 }
 
 fn handle(req: Request) -> Response {
     match req {
         // Pty is handled in main() — it takes over the whole connection.
-        Request::Pty { .. } => Response::Error {
-            message: "pty must be the first and only request on its connection".into(),
-        },
+        Request::Pty { .. } => error("pty must be the first and only request on its connection"),
         Request::Ping => Response::Ok {
             result: serde_json::json!({"agent": "ready"}),
         },
@@ -101,9 +124,7 @@ fn exec(
             Ok(child) => Response::Ok {
                 result: serde_json::json!({"pid": child.id(), "background": true}),
             },
-            Err(e) => Response::Error {
-                message: e.to_string(),
-            },
+            Err(e) => error(e.to_string()),
         }
     } else {
         match c.output() {
@@ -114,9 +135,7 @@ fn exec(
                     "stderr": String::from_utf8_lossy(&out.stderr),
                 }),
             },
-            Err(e) => Response::Error {
-                message: e.to_string(),
-            },
+            Err(e) => error(e.to_string()),
         }
     }
 }
@@ -124,7 +143,7 @@ fn exec(
 fn write_file(path: String, content_b64: String) -> Response {
     let bytes = match b64_decode(&content_b64) {
         Ok(b) => b,
-        Err(e) => return Response::Error { message: e },
+        Err(e) => return error(e),
     };
     if let Some(parent) = Path::new(&path).parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -133,9 +152,7 @@ fn write_file(path: String, content_b64: String) -> Response {
         Ok(()) => Response::Ok {
             result: serde_json::json!({"written": true, "path": path}),
         },
-        Err(e) => Response::Error {
-            message: e.to_string(),
-        },
+        Err(e) => error(e.to_string()),
     }
 }
 
@@ -144,9 +161,7 @@ fn read_file(path: String) -> Response {
         Ok(bytes) => Response::Ok {
             result: serde_json::json!({"content_b64": b64_encode(&bytes)}),
         },
-        Err(e) => Response::Error {
-            message: e.to_string(),
-        },
+        Err(e) => io_error(e),
     }
 }
 
@@ -165,9 +180,7 @@ fn list_dir(path: String) -> Response {
                 result: serde_json::json!({"entries": names}),
             }
         }
-        Err(e) => Response::Error {
-            message: e.to_string(),
-        },
+        Err(e) => io_error(e),
     }
 }
 
@@ -187,9 +200,7 @@ fn ready_http(url: String, timeout_seconds: u64) -> Response {
             };
         }
         if std::time::Instant::now() >= deadline {
-            return Response::Error {
-                message: format!("ready check timed out after {timeout_seconds}s"),
-            };
+            return error(format!("ready check timed out after {timeout_seconds}s"));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
@@ -294,15 +305,11 @@ fn main() {
                         let code = pty::bridge(session);
                         std::process::exit(code);
                     }
-                    Err(e) => Response::Error {
-                        message: format!("pty: {e}"),
-                    },
+                    Err(e) => error(format!("pty: {e}")),
                 }
             }
             Ok(req) => handle(req),
-            Err(e) => Response::Error {
-                message: format!("bad request: {e}"),
-            },
+            Err(e) => error(format!("bad request: {e}")),
         };
         let _ = writeln!(stdout, "{}", serde_json::to_string(&resp).unwrap());
         let _ = stdout.flush();

@@ -97,12 +97,26 @@ impl NodeClient for RemoteNodeClient {
     }
 
     async fn read_file(&self, handle: &str, path: &str) -> Result<Vec<u8>> {
-        let v = self
-            .post_json(
-                "/internal/read_file",
-                json!({ "handle": handle, "path": path }),
-            )
-            .await?;
+        let res = self
+            .http
+            .post(format!("{}/internal/read_file", self.base))
+            .header(NODE_TOKEN_HEADER, &self.token)
+            .json(&json!({ "handle": handle, "path": path }))
+            .send()
+            .await
+            .with_context(|| format!("remote node {} /internal/read_file", self.node_id))?;
+        if res.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(crate::node::file_not_found(path));
+        }
+        if !res.status().is_success() {
+            let code = res.status();
+            let msg = res.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "remote node {} /internal/read_file -> {code}: {msg}",
+                self.node_id
+            ));
+        }
+        let v = res.json().await.unwrap_or(serde_json::Value::Null);
         let data = v.get("data_b64").and_then(|d| d.as_str()).unwrap_or("");
         unb64(data)
     }

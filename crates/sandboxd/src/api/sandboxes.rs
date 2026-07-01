@@ -294,12 +294,6 @@ pub struct FileQuery {
     pub path: String,
 }
 
-/// A guest file op failed because the path does not exist (ENOENT). The guest
-/// agent returns the raw OS error text, so match it to return 404 (not 500).
-fn is_file_not_found(err: &anyhow::Error) -> bool {
-    err.to_string().contains("No such file or directory")
-}
-
 pub async fn read_file(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -318,7 +312,7 @@ pub async fn read_file(
         .await
         .map_err(|e| {
             // A missing file is a 404, not a 500.
-            if is_file_not_found(&e) {
+            if crate::node::is_file_not_found(&e) {
                 ApiError::NotFound(format!("file {}", q.path))
             } else {
                 ApiError::Internal(e)
@@ -592,16 +586,13 @@ fn unbase64(input: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn enoent_maps_to_file_not_found() {
-        // ENOENT from the guest agent -> 404, anything else -> 500.
-        assert!(is_file_not_found(&anyhow::anyhow!(
-            "guest agent error: No such file or directory (os error 2)"
-        )));
-        assert!(!is_file_not_found(&anyhow::anyhow!(
-            "guest agent error: connection reset by peer"
+        assert!(crate::node::is_file_not_found(
+            &crate::node::file_not_found("missing.txt")
+        ));
+        assert!(!crate::node::is_file_not_found(&anyhow::anyhow!(
+            "connection reset by peer"
         )));
     }
 }

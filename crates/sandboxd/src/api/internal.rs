@@ -23,6 +23,14 @@ fn err(e: anyhow::Error) -> (StatusCode, String) {
     (StatusCode::BAD_GATEWAY, e.to_string())
 }
 
+fn node_err(e: anyhow::Error) -> (StatusCode, String) {
+    if crate::node::is_file_not_found(&e) {
+        (StatusCode::NOT_FOUND, "not_found".to_string())
+    } else {
+        err(e)
+    }
+}
+
 pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/place", post(place))
@@ -103,7 +111,11 @@ struct PathReq {
     path: String,
 }
 async fn read_file(State(s): State<AppState>, Json(r): Json<PathReq>) -> R {
-    let bytes = s.local.read_file(&r.handle, &r.path).await.map_err(err)?;
+    let bytes = s
+        .local
+        .read_file(&r.handle, &r.path)
+        .await
+        .map_err(node_err)?;
     Ok(Json(json!({ "data_b64": b64(&bytes) })))
 }
 

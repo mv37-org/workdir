@@ -115,6 +115,15 @@ async fn one_node_acceptance_flow() {
         .unwrap();
     let read: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(read["content"], "hello");
+    let resp = c
+        .get(format!("{base}/v1/sandboxes/{id}/files?path=a/missing.txt"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "missing file should be a 404");
+    let missing: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(missing["error"]["code"], "not_found");
 
     // --- expose a preview port ---
     let resp = c
@@ -124,7 +133,8 @@ async fn one_node_acceptance_flow() {
         .await
         .unwrap();
     let port: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(port["url"], format!("https://{id}-3000.test.local"));
+    let host_id = id.replace('_', "-");
+    assert_eq!(port["url"], format!("https://{host_id}-3000.test.local"));
 
     // --- knob rejection: 13 GB memory ---
     let resp = c
