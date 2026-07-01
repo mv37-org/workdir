@@ -768,6 +768,13 @@ pub async fn stop_sandbox(state: &AppState, sb: Sandbox) -> ApiResult<Sandbox> {
 /// Driven by the idle reaper. The caller must not invoke this on a sandbox with
 /// resident secrets (we never snapshot secrets, review M3); the reaper checks.
 pub async fn standby_sandbox(state: &AppState, sb: Sandbox) -> ApiResult<Sandbox> {
+    if state
+        .store
+        .has_running_exec_jobs(&sb.id)
+        .map_err(ApiError::Internal)?
+    {
+        return Ok(sb);
+    }
     // CAS Running -> Stopping (the shared off-CPU transient); a concurrent
     // stop/delete/reaper loses the race and we no-op.
     let updated = match state

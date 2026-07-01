@@ -3,7 +3,8 @@
 use crate::api::load_owned;
 use crate::auth::AuthContext;
 use crate::error::{ApiError, ApiResult};
-use crate::model::CreateSandboxRequest;
+use crate::ids;
+use crate::model::{CreateSandboxRequest, ExecJob, ExecJobState};
 use crate::runtime::ExecRequest;
 use crate::service;
 use crate::state::AppState;
@@ -12,9 +13,12 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
+use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+
+const MAX_EXEC_LOG_BYTES: usize = 1024 * 1024;
 
 pub async fn create(
     State(state): State<AppState>,
@@ -111,7 +115,7 @@ pub async fn exec(
     Extension(ctx): Extension<AuthContext>,
     Path(id): Path<String>,
     Json(body): Json<ExecBody>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<(StatusCode, Json<Value>)> {
     let sb = load_owned(&state, &ctx, &id)?;
     // Perpetual standby: a parked sandbox transparently auto-resumes here, so a
     // client that hasn't touched it in a while just sees a slightly slower exec.
@@ -129,6 +133,10 @@ pub async fn exec(
     // Mark activity before and after so neither the run nor a quick follow-up is
     // mistaken for idle (review #7).
     service::touch_activity(&state, &mut sb);
+    if body.background {
+        let job = start_exec_job(state.clone(), sb, handle, body)?;
+        return Ok((StatusCode::ACCEPTED, Json(exec_job_status_view(&job))));
+    }
     let result = state
         .node_for(sb.node_id.as_deref().unwrap_or(""))
         .exec(
@@ -143,11 +151,142 @@ pub async fn exec(
         .await
         .map_err(ApiError::Internal)?;
     service::touch_activity(&state, &mut sb);
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        })),
+    ))
+}
+
+pub async fn exec_status(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path((id, cmd_id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let job = load_owned_exec_job(&state, &ctx, &id, &cmd_id)?;
+    Ok(Json(exec_job_status_view(&job)))
+}
+
+pub async fn exec_logs(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path((id, cmd_id)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let job = load_owned_exec_job(&state, &ctx, &id, &cmd_id)?;
     Ok(Json(json!({
-        "exit_code": result.exit_code,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
+        "cmd_id": job.id,
+        "state": job.state.as_str(),
+        "stdout": job.stdout,
+        "stderr": job.stderr,
+        "truncated": job.logs_truncated,
     })))
+}
+
+fn start_exec_job(
+    state: AppState,
+    sb: crate::model::Sandbox,
+    handle: String,
+    body: ExecBody,
+) -> ApiResult<ExecJob> {
+    let now = Utc::now();
+    let job = ExecJob {
+        id: ids::command_id(),
+        sandbox_id: sb.id.clone(),
+        org_id: sb.org_id.clone(),
+        state: ExecJobState::Running,
+        cmd: body.cmd.clone(),
+        cwd: body.cwd.clone(),
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        logs_truncated: false,
+        error: None,
+        started_at: now,
+        finished_at: None,
+    };
+    state.store.put_exec_job(&job).map_err(ApiError::Internal)?;
+
+    let node = state.node_for(sb.node_id.as_deref().unwrap_or(""));
+    let job_for_task = job.clone();
+    let req = ExecRequest {
+        cmd: body.cmd,
+        cwd: body.cwd,
+        env: body.env,
+        background: false,
+    };
+    tokio::spawn(async move {
+        let mut finished = job_for_task;
+        match node.exec(&handle, &req).await {
+            Ok(result) => {
+                let (stdout, stdout_truncated) = truncate_log(result.stdout);
+                let (stderr, stderr_truncated) = truncate_log(result.stderr);
+                finished.state = ExecJobState::Exited;
+                finished.exit_code = Some(result.exit_code);
+                finished.stdout = stdout;
+                finished.stderr = stderr;
+                finished.logs_truncated = stdout_truncated || stderr_truncated;
+            }
+            Err(e) => {
+                finished.state = ExecJobState::Failed;
+                finished.error = Some(e.to_string());
+            }
+        }
+        let now = Utc::now();
+        finished.finished_at = Some(now);
+        if let Err(e) = state.store.put_exec_job(&finished) {
+            tracing::error!(error = %e, cmd_id = %finished.id, "persist exec job completion failed");
+        }
+        let _ = state.store.touch_last_active(&finished.sandbox_id, now);
+    });
+
+    Ok(job)
+}
+
+fn load_owned_exec_job(
+    state: &AppState,
+    ctx: &AuthContext,
+    sandbox_id: &str,
+    cmd_id: &str,
+) -> ApiResult<ExecJob> {
+    let sb = load_owned(state, ctx, sandbox_id)?;
+    let job = state
+        .store
+        .get_exec_job(cmd_id)
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("exec job {cmd_id}")))?;
+    if job.sandbox_id != sb.id || job.org_id != ctx.org_id {
+        return Err(ApiError::NotFound(format!("exec job {cmd_id}")));
+    }
+    Ok(job)
+}
+
+fn exec_job_status_view(job: &ExecJob) -> Value {
+    json!({
+        "cmd_id": job.id,
+        "state": job.state.as_str(),
+        "exit_code": job.exit_code,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "error": job.error,
+        "logs_truncated": job.logs_truncated,
+        "status_url": format!("/v1/sandboxes/{}/exec/{}", job.sandbox_id, job.id),
+        "logs_url": format!("/v1/sandboxes/{}/exec/{}/logs", job.sandbox_id, job.id),
+    })
+}
+
+fn truncate_log(mut value: String) -> (String, bool) {
+    if value.len() <= MAX_EXEC_LOG_BYTES {
+        return (value, false);
+    }
+    let mut end = MAX_EXEC_LOG_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    (value, true)
 }
 
 #[derive(Deserialize)]

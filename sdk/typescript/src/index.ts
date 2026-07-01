@@ -89,6 +89,26 @@ export interface ExecResult {
   stderr: string;
 }
 
+export interface ExecJob {
+  cmd_id: string;
+  state: "running" | "exited" | "failed" | string;
+  exit_code?: number | null;
+  started_at: string;
+  finished_at?: string | null;
+  error?: string | null;
+  logs_truncated?: boolean;
+  status_url?: string;
+  logs_url?: string;
+}
+
+export interface ExecLogs {
+  cmd_id: string;
+  state: string;
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+}
+
 export class SandboxError extends Error {
   constructor(public status: number, public code: string, message: string) {
     super(`[${status} ${code}] ${message}`);
@@ -145,13 +165,23 @@ export class Sandbox {
     return this;
   }
 
-  async exec(cmd: string, opts: { cwd?: string; env?: Record<string, string>; background?: boolean } = {}): Promise<ExecResult> {
+  async exec(cmd: string, opts?: { cwd?: string; env?: Record<string, string>; background?: false }): Promise<ExecResult>;
+  async exec(cmd: string, opts: { cwd?: string; env?: Record<string, string>; background: true }): Promise<ExecJob>;
+  async exec(cmd: string, opts: { cwd?: string; env?: Record<string, string>; background?: boolean } = {}): Promise<ExecResult | ExecJob> {
     return this.http.request("POST", `/v1/sandboxes/${this.id}/exec`, {
       cmd,
       cwd: opts.cwd,
       env: opts.env,
       background: opts.background ?? false,
     });
+  }
+
+  async execStatus(cmdId: string): Promise<ExecJob> {
+    return this.http.request("GET", `/v1/sandboxes/${this.id}/exec/${cmdId}`);
+  }
+
+  async execLogs(cmdId: string): Promise<ExecLogs> {
+    return this.http.request("GET", `/v1/sandboxes/${this.id}/exec/${cmdId}/logs`);
   }
 
   async writeFile(path: string, content: string): Promise<void> {

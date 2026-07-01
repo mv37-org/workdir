@@ -6,7 +6,7 @@
 
 use crate::images::{CustomImage, ImageStatus};
 use crate::lifecycle::State;
-use crate::model::Sandbox;
+use crate::model::{ExecJob, ExecJobState, Sandbox};
 use crate::nodes::Node;
 use crate::usage::{ApiKey, Org, UsageInterval};
 use anyhow::{Context, Result};
@@ -45,6 +45,17 @@ CREATE TABLE IF NOT EXISTS sandboxes (
 CREATE INDEX IF NOT EXISTS idx_sandboxes_org   ON sandboxes(org_id);
 CREATE INDEX IF NOT EXISTS idx_sandboxes_node  ON sandboxes(node_id);
 CREATE INDEX IF NOT EXISTS idx_sandboxes_state ON sandboxes(state);
+CREATE TABLE IF NOT EXISTS exec_jobs (
+    id         TEXT PRIMARY KEY,
+    sandbox_id TEXT NOT NULL,
+    org_id     TEXT NOT NULL,
+    state      TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    data       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_exec_jobs_sandbox ON exec_jobs(sandbox_id);
+CREATE INDEX IF NOT EXISTS idx_exec_jobs_org ON exec_jobs(org_id);
+CREATE INDEX IF NOT EXISTS idx_exec_jobs_state ON exec_jobs(state);
 CREATE TABLE IF NOT EXISTS images (
     id      TEXT PRIMARY KEY,
     org_id  TEXT NOT NULL,
@@ -387,6 +398,71 @@ impl Store {
             out.push(serde_json::from_str(&r?)?);
         }
         Ok(out)
+    }
+
+    // --- exec jobs --------------------------------------------------------
+
+    pub fn put_exec_job(&self, job: &ExecJob) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO exec_jobs(id, sandbox_id, org_id, state, created_at, data)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                sandbox_id=excluded.sandbox_id, org_id=excluded.org_id,
+                state=excluded.state, data=excluded.data",
+            params![
+                job.id,
+                job.sandbox_id,
+                job.org_id,
+                job.state.as_str(),
+                job.started_at.to_rfc3339(),
+                serde_json::to_string(job)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_exec_job(&self, id: &str) -> Result<Option<ExecJob>> {
+        let conn = self.lock();
+        let row: Option<String> = conn
+            .query_row(
+                "SELECT data FROM exec_jobs WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(row.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+
+    pub fn has_running_exec_jobs(&self, sandbox_id: &str) -> Result<bool> {
+        let conn = self.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM exec_jobs WHERE sandbox_id = ?1 AND state = 'running'",
+            params![sandbox_id],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn reconcile_interrupted_exec_jobs(&self, now: DateTime<Utc>) -> Result<usize> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT id, data FROM exec_jobs WHERE state = 'running'")?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        drop(stmt);
+        let count = rows.len();
+        for (id, data) in rows {
+            let mut job: ExecJob = serde_json::from_str(&data)?;
+            job.state = ExecJobState::Failed;
+            job.error = Some("interrupted by control-plane restart".to_string());
+            job.finished_at = Some(now);
+            conn.execute(
+                "UPDATE exec_jobs SET state = 'failed', data = ?2 WHERE id = ?1",
+                params![id, serde_json::to_string(&job)?],
+            )?;
+        }
+        Ok(count)
     }
 
     // --- images ---------------------------------------------------------

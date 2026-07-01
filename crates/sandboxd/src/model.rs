@@ -621,6 +621,54 @@ pub struct VolumeAttach {
 }
 
 // ---------------------------------------------------------------------------
+// Async exec jobs
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecJobState {
+    Running,
+    /// The command process exited; inspect `exit_code` for success/failure.
+    Exited,
+    /// The platform could not start or complete the command.
+    Failed,
+}
+
+impl ExecJobState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ExecJobState::Running => "running",
+            ExecJobState::Exited => "exited",
+            ExecJobState::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecJob {
+    pub id: String,
+    pub sandbox_id: String,
+    pub org_id: String,
+    pub state: ExecJobState,
+    pub cmd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub stdout: String,
+    #[serde(default)]
+    pub stderr: String,
+    #[serde(default)]
+    pub logs_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+// ---------------------------------------------------------------------------
 // Create request (spec §3.3, §3.4, §19)
 // ---------------------------------------------------------------------------
 

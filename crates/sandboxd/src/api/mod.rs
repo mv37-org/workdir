@@ -33,6 +33,11 @@ pub fn router(state: AppState) -> Router {
             get(sandboxes::get).delete(sandboxes::delete),
         )
         .route("/sandboxes/:id/exec", post(sandboxes::exec))
+        .route("/sandboxes/:id/exec/:cmd_id", get(sandboxes::exec_status))
+        .route(
+            "/sandboxes/:id/exec/:cmd_id/logs",
+            get(sandboxes::exec_logs),
+        )
         .route("/sandboxes/:id/metrics", get(sandboxes::metrics))
         .route("/sandboxes/:id/pty", get(pty::pty_ws))
         .route(

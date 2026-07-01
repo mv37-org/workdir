@@ -14,6 +14,14 @@ const workdir = new Client("https://api.workdir.dev", process.env.WORKDIR_API_KE
 const box = await workdir.sandboxes.create();
 const { stdout } = await box.exec("echo hello");
 console.log(stdout);
+
+const job = await box.exec("npm test", { background: true });
+let status = await box.execStatus(job.cmd_id);
+while (status.state === "running") {
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  status = await box.execStatus(job.cmd_id);
+}
+console.log(await box.execLogs(job.cmd_id));
 await box.delete();
 ```
 
