@@ -132,6 +132,18 @@ pub struct RuntimeConfig {
     /// alternative is a custom seccompiler filter. Default false.
     #[serde(default)]
     pub firecracker_no_seccomp: bool,
+    /// Require the data filesystem to support reflinks (FICLONE / `cp
+    /// --reflink`) before any fork or private-disk staging emits a copy. When
+    /// true, the runtime probes the data FS once at startup and FAILS CLOSED —
+    /// fork / private-disk staging bail rather than silently emit a multi-GB
+    /// full copy on a non-reflink FS (ext4 without reflink, tmpfs, etc.). When
+    /// false (default) the staging path falls back to a real copy, preserving
+    /// today's behavior on dev / ext4 boxes. This is deliberately softer than
+    /// forcing `cp --reflink=always` everywhere, which would also hard-fail
+    /// restore's legitimate cross-FS copies — only the multi-GB hot-path copies
+    /// are gated.
+    #[serde(default)]
+    pub require_reflink: bool,
 }
 
 fn default_restore_mem_backend() -> String {
@@ -270,6 +282,7 @@ impl Default for RuntimeConfig {
             jailer_pool_size: 0,
             quiet_guest_boot: true,
             firecracker_no_seccomp: false,
+            require_reflink: false,
         }
     }
 }
@@ -377,6 +390,7 @@ mod tests {
         assert_eq!(cfg.runtime.restore_mem_backend, "file");
         assert!(cfg.runtime.prewarm_mem_cache);
         assert!(!cfg.runtime.shared_rootfs);
+        assert!(!cfg.runtime.require_reflink);
     }
 
     #[test]
@@ -386,5 +400,6 @@ mod tests {
         assert!(r.prewarm_mem_cache);
         assert!(!r.shared_rootfs);
         assert!(r.cpu_template.is_empty());
+        assert!(!r.require_reflink);
     }
 }
