@@ -39,6 +39,11 @@ mkdir -p /workspace /run /tmp
 # Loopback up first, unconditionally: localhost services (dev servers, the
 # startup ready.http://127.0.0.1 check) bind 127.0.0.1; lo DOWN => EADDRNOTAVAIL.
 ip link set lo up
+# Guests ship with an empty /etc/hosts (it's a runtime bind-mount under Docker,
+# so `docker export` captures nothing), which makes `localhost` fail to resolve
+# and breaks loopback-by-name connects (e.g. noVNC's websockify -> localhost:5900).
+# Seed the canonical loopback names.
+printf '127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n' > /etc/hosts
 WDIP=""; WDGW=""; WDDNS="1.1.1.1"
 for tok in $(cat /proc/cmdline); do
   case "$tok" in
