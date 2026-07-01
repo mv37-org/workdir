@@ -31,6 +31,7 @@ mkdir -p /sys/fs/cgroup && mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null
 mkdir -p /workspace /run /tmp
 
 ip link set lo up 2>/dev/null
+printf '127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n' > /etc/hosts 2>/dev/null
 WDIP=""; WDGW=""; WDDNS="1.1.1.1"
 for tok in $(cat /proc/cmdline); do
   case "$tok" in
