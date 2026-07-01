@@ -32,6 +32,10 @@ pub fn build_id() -> String {
     format!("build_{}", rand_hex(6))
 }
 
+pub fn command_id() -> String {
+    format!("cmd_{}", rand_hex(6))
+}
+
 pub fn volume_id() -> String {
     format!("vol_{}", rand_hex(6))
 }

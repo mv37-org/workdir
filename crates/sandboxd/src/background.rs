@@ -52,6 +52,9 @@ pub fn spawn_idle_reaper(state: AppState) {
                 if idle < sb.auto_stop_seconds as i64 {
                     continue;
                 }
+                if state.store.has_running_exec_jobs(&sb.id).unwrap_or(false) {
+                    continue;
+                }
                 // Standby is gated (off by default) so the snapshot/restore path
                 // is validated on a node before real sandboxes depend on it. A
                 // sandbox with resident secrets is never snapshotted (review M3),
@@ -162,7 +165,7 @@ pub fn spawn_pressure_reaper(state: AppState) {
             };
             // One victim per tick: standby itself relieves pressure, so let the
             // next reading decide whether more shedding is needed.
-            let Some(victim) = pick_pressure_victim(&active) else {
+            let Some(victim) = pick_pressure_victim(&state, &active) else {
                 continue;
             };
             tracing::warn!(
@@ -180,10 +183,14 @@ pub fn spawn_pressure_reaper(state: AppState) {
 
 /// The least-recently-active RUNNING sandbox without resident secrets (secrets
 /// are never snapshotted, so those fall through to the normal idle stop).
-fn pick_pressure_victim(active: &[crate::model::Sandbox]) -> Option<&crate::model::Sandbox> {
+fn pick_pressure_victim<'a>(
+    state: &AppState,
+    active: &'a [crate::model::Sandbox],
+) -> Option<&'a crate::model::Sandbox> {
     active
         .iter()
         .filter(|s| s.state == State::Running && s.secret_names.is_empty())
+        .filter(|s| !state.store.has_running_exec_jobs(&s.id).unwrap_or(false))
         .min_by_key(|s| s.last_active_at)
 }
 

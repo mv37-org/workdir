@@ -155,6 +155,75 @@ async fn one_node_acceptance_flow() {
 }
 
 #[tokio::test]
+async fn background_exec_returns_job_status_and_logs() {
+    let (base, key, _tmp) = spawn_server().await;
+    let c = client();
+    let auth = format!("Bearer {key}");
+
+    let id = c
+        .post(format!("{base}/v1/sandboxes"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = c
+        .post(format!("{base}/v1/sandboxes/{id}/exec"))
+        .header("authorization", &auth)
+        .json(&serde_json::json!({
+            "cmd": "printf out; printf err >&2; exit 7",
+            "background": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let launched: serde_json::Value = resp.json().await.unwrap();
+    let cmd_id = launched["cmd_id"].as_str().unwrap().to_string();
+    assert!(cmd_id.starts_with("cmd_"));
+    assert_eq!(launched["state"], "running");
+
+    let mut status = launched;
+    for _ in 0..100 {
+        if status["state"] != "running" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        status = c
+            .get(format!("{base}/v1/sandboxes/{id}/exec/{cmd_id}"))
+            .header("authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+    }
+    assert_eq!(status["state"], "exited");
+    assert_eq!(status["exit_code"], 7);
+    assert!(status["finished_at"].is_string());
+
+    let logs: serde_json::Value = c
+        .get(format!("{base}/v1/sandboxes/{id}/exec/{cmd_id}/logs"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(logs["stdout"], "out");
+    assert_eq!(logs["stderr"], "err");
+    assert_eq!(logs["truncated"], false);
+}
+
+#[tokio::test]
 async fn concurrent_resume_does_not_double_bill() {
     // Regression for review #2/#3: a double-clicked resume must not open two
     // billing intervals or otherwise corrupt state.

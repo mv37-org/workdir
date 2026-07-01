@@ -41,10 +41,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 __version__ = "0.1.1"
-__all__ = ["Client", "ExecResult", "Sandbox", "SandboxError"]
+__all__ = ["Client", "ExecJob", "ExecLogs", "ExecResult", "Sandbox", "SandboxError"]
 
 
 class SandboxError(Exception):
@@ -60,6 +60,28 @@ class ExecResult:
     exit_code: int
     stdout: str
     stderr: str
+
+
+@dataclass
+class ExecJob:
+    cmd_id: str
+    state: str
+    started_at: str
+    exit_code: Optional[int] = None
+    finished_at: Optional[str] = None
+    error: Optional[str] = None
+    logs_truncated: bool = False
+    status_url: Optional[str] = None
+    logs_url: Optional[str] = None
+
+
+@dataclass
+class ExecLogs:
+    cmd_id: str
+    state: str
+    stdout: str
+    stderr: str
+    truncated: bool
 
 
 class _Http:
@@ -126,14 +148,50 @@ class Sandbox:
         return self
 
     def exec(self, cmd: str, cwd: Optional[str] = None, env: Optional[dict] = None,
-             background: bool = False) -> ExecResult:
+             background: bool = False) -> Union[ExecResult, ExecJob]:
         body = {"cmd": cmd, "background": background}
         if cwd:
             body["cwd"] = cwd
         if env:
             body["env"] = env
         r = self._http.request("POST", f"/v1/sandboxes/{self.id}/exec", body)
+        if background:
+            return ExecJob(
+                cmd_id=r["cmd_id"],
+                state=r["state"],
+                started_at=r["started_at"],
+                exit_code=r.get("exit_code"),
+                finished_at=r.get("finished_at"),
+                error=r.get("error"),
+                logs_truncated=bool(r.get("logs_truncated", False)),
+                status_url=r.get("status_url"),
+                logs_url=r.get("logs_url"),
+            )
         return ExecResult(r["exit_code"], r["stdout"], r["stderr"])
+
+    def exec_status(self, cmd_id: str) -> ExecJob:
+        r = self._http.request("GET", f"/v1/sandboxes/{self.id}/exec/{cmd_id}")
+        return ExecJob(
+            cmd_id=r["cmd_id"],
+            state=r["state"],
+            started_at=r["started_at"],
+            exit_code=r.get("exit_code"),
+            finished_at=r.get("finished_at"),
+            error=r.get("error"),
+            logs_truncated=bool(r.get("logs_truncated", False)),
+            status_url=r.get("status_url"),
+            logs_url=r.get("logs_url"),
+        )
+
+    def exec_logs(self, cmd_id: str) -> ExecLogs:
+        r = self._http.request("GET", f"/v1/sandboxes/{self.id}/exec/{cmd_id}/logs")
+        return ExecLogs(
+            cmd_id=r["cmd_id"],
+            state=r["state"],
+            stdout=r["stdout"],
+            stderr=r["stderr"],
+            truncated=bool(r.get("truncated", False)),
+        )
 
     def write_file(self, path: str, content: str) -> None:
         self._http.request("PUT", f"/v1/sandboxes/{self.id}/files",

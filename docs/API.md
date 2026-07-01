@@ -13,7 +13,9 @@ The default create is one call with no body and yields the cheapest, fastest pat
 | `POST` | `/v1/sandboxes` | Create. Empty body = default cheap path. |
 | `GET` | `/v1/sandboxes` | List the caller's sandboxes. |
 | `GET` | `/v1/sandboxes/:id` | Get one (with timings, urls, price, uptime, cost). |
-| `POST` | `/v1/sandboxes/:id/exec` | `{cmd, cwd?, env?, background?}` → `{exit_code, stdout, stderr}`. |
+| `POST` | `/v1/sandboxes/:id/exec` | `{cmd, cwd?, env?, background?}` → sync `{exit_code, stdout, stderr}` or, with `background: true`, `202 {cmd_id, state, status_url, logs_url}`. |
+| `GET` | `/v1/sandboxes/:id/exec/:cmd_id` | Poll background exec status → `{state, exit_code?, started_at, finished_at?, error?}`. |
+| `GET` | `/v1/sandboxes/:id/exec/:cmd_id/logs` | Fetch captured background exec output → `{stdout, stderr, truncated}`. |
 | `GET` | `/v1/sandboxes/:id/pty` | WebSocket interactive shell (a real in-guest TTY over vsock on Firecracker). |
 | `GET` | `/v1/sandboxes/:id/metrics` | Working-set metrics: host RSS vs reserved shape, balloon target + guest memory stats, net counters. |
 | `GET` | `/v1/sandboxes/:id/files?path=…` | Read a file → `{content, encoding}`. |
@@ -41,6 +43,8 @@ plus `deleting → deleted` and `failed`.
   first call. To the user the sandbox stays alive; it simply stops costing
   anything while idle. (Sandboxes with resident secrets are never snapshotted, so
   they fall back to a plain `stopped` instead.)
+- Running background exec jobs keep the sandbox out of automatic standby until
+  the tracked command exits.
 
 ### Create request
 

@@ -190,7 +190,7 @@ pub async fn build_state(cfg: Config) -> Result<crate::state::AppState> {
     local.configure_default_pools(cfg.hotpool.base_target).await;
 
     let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(30))
         .build()
         .unwrap_or_default();
 
@@ -202,6 +202,14 @@ pub async fn build_state(cfg: Config) -> Result<crate::state::AppState> {
             "reconciled interrupted sandboxes from a prior run"
         ),
         Err(e) => tracing::error!(error = %e, "startup reconciliation failed"),
+    }
+    match store.reconcile_interrupted_exec_jobs(chrono::Utc::now()) {
+        Ok(0) => {}
+        Ok(n) => tracing::warn!(
+            count = n,
+            "reconciled interrupted exec jobs from a prior run"
+        ),
+        Err(e) => tracing::error!(error = %e, "exec job startup reconciliation failed"),
     }
 
     let secret_key = crate::secrets::load_or_create_key(&cfg.server.data_dir)

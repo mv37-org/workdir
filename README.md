@@ -80,6 +80,19 @@ print(box.exec("python3 -c 'print(2+2)'").stdout)   # "4"
 box.delete()
 ```
 
+### Async exec jobs
+
+```ts
+const job = await box.exec("npm test", { background: true });
+let status = await box.execStatus(job.cmd_id);
+while (status.state === "running") {
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  status = await box.execStatus(job.cmd_id);
+}
+const logs = await box.execLogs(job.cmd_id);
+console.log(status.exit_code, logs.stdout);
+```
+
 ### A real workload — clone, install, preview
 
 ```ts
