@@ -294,6 +294,12 @@ pub struct FileQuery {
     pub path: String,
 }
 
+/// A guest file op failed because the path does not exist (ENOENT). The guest
+/// agent returns the raw OS error text, so match it to return 404 (not 500).
+fn is_file_not_found(err: &anyhow::Error) -> bool {
+    err.to_string().contains("No such file or directory")
+}
+
 pub async fn read_file(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -310,7 +316,14 @@ pub async fn read_file(
         .node_for(sb.node_id.as_deref().unwrap_or(""))
         .read_file(&handle, &q.path)
         .await
-        .map_err(ApiError::Internal)?;
+        .map_err(|e| {
+            // A missing file is a 404, not a 500.
+            if is_file_not_found(&e) {
+                ApiError::NotFound(format!("file {}", q.path))
+            } else {
+                ApiError::Internal(e)
+            }
+        })?;
     let body = match String::from_utf8(bytes.clone()) {
         Ok(text) => json!({ "path": q.path, "encoding": "utf8", "content": text }),
         Err(_) => json!({ "path": q.path, "encoding": "base64", "content": base64(&bytes) }),
@@ -575,4 +588,20 @@ fn unbase64(input: &str) -> Result<Vec<u8>, String> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enoent_maps_to_file_not_found() {
+        // ENOENT from the guest agent -> 404, anything else -> 500.
+        assert!(is_file_not_found(&anyhow::anyhow!(
+            "guest agent error: No such file or directory (os error 2)"
+        )));
+        assert!(!is_file_not_found(&anyhow::anyhow!(
+            "guest agent error: connection reset by peer"
+        )));
+    }
 }
